@@ -27,6 +27,33 @@ docker run -d --name completions-proxy \
   ghcr.io/dufangshi/responses-to-completions-proxy:latest
 ```
 
+## OpenClaw 对接教程（Custom Provider）
+
+如果你要把这个代理接到 OpenClaw，推荐走向导配置，不必手改大段 JSON：
+
+1. 先启动本代理（本地监听 `127.0.0.1:18010`）
+2. 打开配置向导：`openclaw configure`（或 `openclaw config`）
+3. 进入 Model/Provider 相关步骤，选择 **Custom Provider**
+4. Provider 名称填你自己的名字（例如 `custom-proxy-oai`）
+5. API 类型选 `openai-completions`
+6. Base URL 填 `http://127.0.0.1:18010/v1`
+7. API Key 可填占位值（例如 `111`，由你的代理自行处理）
+8. 添加模型 `gpt-5.3-codex`（显示名可自定义）
+9. **务必手动把 `contextWindow` 和 `maxTokens` 调大**（见下一节建议值），否则容易因为默认值过小导致请求被截断或校验报错
+
+可用以下命令快速确认模型是否可见：
+
+```bash
+openclaw models list
+```
+
+## gpt-5.3-codex 推荐窗口参数
+
+- `contextWindow`: `400000`
+- `maxTokens`（最大输出）: `128000`
+
+这两项建议与你在 OpenClaw Custom Provider 里保持一致（或至少不要低于你的实际业务需求）。
+
 ## 新设备最简步骤（默认已安装 uv）
 
 ```bash
