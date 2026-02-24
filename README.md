@@ -48,6 +48,19 @@ docker run -d --name completions-proxy \
 openclaw models list
 ```
 
+### 手动修改 `openclaw.json`（关键）
+
+在你通过向导导入 Custom Provider 之后，建议再手动检查一次模型参数：
+
+1. 打开 OpenClaw 配置文件 `openclaw.json`
+2. 找到你刚添加的 Custom Provider（例如 `custom-proxy-oai`）
+3. 在对应模型（例如 `gpt-5.3-codex`）下确认并修改：
+   - `contextWindow` 为 `400000`
+   - `maxTokens` 为 `128000`
+4. 保存后重启 OpenClaw（或重开会话）使配置生效
+
+原因：在 **Custom Provider 显式配置** 场景，OpenClaw 通常以本地模型配置为准；若值过小会导致上下文预算不足或参数校验失败。
+
 ## gpt-5.3-codex 推荐窗口参数
 
 - `contextWindow`: `400000`
