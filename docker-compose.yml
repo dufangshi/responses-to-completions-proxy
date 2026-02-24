@@ -1,0 +1,17 @@
+services:
+  completions-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/dufangshi/responses-to-completions-proxy:latest
+    container_name: completions-proxy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 18010
+    ports:
+      - "18010:18010"
+    volumes:
+      - ./logs:/app/logs

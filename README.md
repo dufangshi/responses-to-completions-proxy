@@ -6,6 +6,27 @@
 - `/v1/chat/completions` 和 `/chat/completions`
 - `stream=false` 与 `stream=true`
 
+## 一键启动（Docker）
+
+先准备 `.env`（至少填好 `UPSTREAM_BASE_URL` 和 `UPSTREAM_API_KEY`），然后执行：
+
+```bash
+docker compose up -d --build
+```
+
+启动后服务地址：`http://127.0.0.1:18010`
+
+## 一键启动（Public Git Package / GHCR）
+
+仓库配置了自动发布到 GHCR（`ghcr.io/dufangshi/responses-to-completions-proxy`）。
+
+```bash
+docker run -d --name completions-proxy \
+  --env-file .env \
+  -p 18010:18010 \
+  ghcr.io/dufangshi/responses-to-completions-proxy:latest
+```
+
 ## 新设备最简步骤（默认已安装 uv）
 
 ```bash
@@ -34,6 +55,14 @@ uv sync
 ```bash
 uv run run.py
 ```
+
+## Docker 发布说明
+
+- 已包含 Docker 构建文件：`Dockerfile`
+- 已包含本地编排：`docker-compose.yml`
+- 已包含 GitHub Actions 自动发布：`.github/workflows/publish-ghcr.yml`
+- `main` 分支推送会更新 `latest` 标签；推 `v*` tag 会发布同名版本标签
+- 若 GHCR 包可见性未自动继承仓库公开属性，请在 GitHub Package 页面手动设为 **Public**
 
 ## 快速测试
 
