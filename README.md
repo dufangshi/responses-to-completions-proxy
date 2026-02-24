@@ -4,6 +4,7 @@
 支持：
 - `/v1/completions` 和 `/completions`
 - `/v1/chat/completions` 和 `/chat/completions`
+- `/v1/models` 和 `/models`
 - `stream=false` 与 `stream=true`
 
 ## 一键启动（Docker）
@@ -53,6 +54,9 @@ openclaw models list
 - `maxTokens`（最大输出）: `128000`
 
 这两项建议与你在 OpenClaw Custom Provider 里保持一致（或至少不要低于你的实际业务需求）。
+
+另外，代理现已提供 `/v1/models` 元数据（包含 `contextWindow/maxTokens`）。
+即便如此，OpenClaw 在 **Custom Provider 显式配置** 场景下仍建议在本地模型配置里明确写入这两个值，避免不同版本行为差异导致的窗口预算不一致。
 
 ## 新设备最简步骤（默认已安装 uv）
 
