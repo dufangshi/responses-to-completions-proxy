@@ -1,0 +1,13 @@
+[project]
+name = "chat-complete-proxy"
+version = "0.1.0"
+description = "Compatibility proxy: OpenAI v1/completions -> v1/responses"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "pydantic==2.11.7",
+  "python-dotenv==1.2.1",
+  "requests==2.32.5",
+  "uvicorn[standard]==0.35.0",
+]
