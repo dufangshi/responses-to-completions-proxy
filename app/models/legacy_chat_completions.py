@@ -9,7 +9,7 @@ class ChatCompletionMessageIn(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     role: str
-    content: str | list[dict[str, Any]]
+    content: str | list[dict[str, Any]] | None = None
     name: str | None = None
     tool_call_id: str | None = None
 
@@ -20,10 +20,12 @@ class LegacyChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageIn]
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     n: int = 1
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     stop: str | list[str] | None = None
     user: str | None = None
     logprobs: bool | None = None
@@ -53,8 +55,9 @@ class LegacyChatCompletionRequest(BaseModel):
 
 class ChatCompletionMessageOut(BaseModel):
     role: str = "assistant"
-    content: str
+    content: str | None = None
     refusal: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionChoice(BaseModel):

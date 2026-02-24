@@ -32,6 +32,45 @@ def _parse_model_map(raw_value: str) -> dict[str, str]:
     return model_map
 
 
+def _parse_reasoning_effort(raw_value: str) -> str | None:
+    value = raw_value.strip().lower()
+    if not value:
+        return None
+    allowed_values = {"low", "medium", "high", "xhigh"}
+    if value not in allowed_values:
+        raise ValueError(
+            "DEFAULT_REASONING_EFFORT must be one of: low, medium, high, xhigh."
+        )
+    return value
+
+
+def _parse_bool(raw_value: str, default: bool = False) -> bool:
+    value = raw_value.strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def _parse_positive_int(raw_value: str, default: int) -> int:
+    value = raw_value.strip()
+    if not value:
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError("RAW_IO_LOG_MAX_CHARS must be >= 1.")
+    return parsed
+
+
+def _parse_non_negative_int(raw_value: str, default: int) -> int:
+    value = raw_value.strip()
+    if not value:
+        return default
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError("RAW_IO_LOG_KEEP_REQUESTS must be >= 0.")
+    return parsed
+
+
 @dataclass(slots=True)
 class Settings:
     app_host: str
@@ -40,7 +79,12 @@ class Settings:
     upstream_api_key: str
     upstream_timeout_seconds: float
     default_upstream_model: str
+    default_reasoning_effort: str | None
     model_map: dict[str, str]
+    raw_io_log_enabled: bool
+    raw_io_log_path: str
+    raw_io_log_max_chars: int
+    raw_io_log_keep_requests: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -56,7 +100,20 @@ class Settings:
             upstream_api_key=os.getenv("UPSTREAM_API_KEY", ""),
             upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")),
             default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.3-codex"),
+            default_reasoning_effort=_parse_reasoning_effort(
+                os.getenv("DEFAULT_REASONING_EFFORT", "high")
+            ),
             model_map=model_map,
+            raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
+            raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),
+            raw_io_log_max_chars=_parse_positive_int(
+                os.getenv("RAW_IO_LOG_MAX_CHARS", "120000"),
+                default=120000,
+            ),
+            raw_io_log_keep_requests=_parse_non_negative_int(
+                os.getenv("RAW_IO_LOG_KEEP_REQUESTS", "10"),
+                default=10,
+            ),
         )
 
     def resolve_model(self, client_model: str | None) -> str:
