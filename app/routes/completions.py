@@ -10,6 +10,7 @@ from app.services.streaming_adapter import (
     completion_stream_usage_chunk,
     encode_sse_done,
     encode_sse_json,
+    extract_stream_error,
     fallback_stream_identity,
     iter_upstream_sse_events,
     wants_usage_chunk,
@@ -133,12 +134,8 @@ async def create_completion(
                     yield encode_sse_done()
                     return
 
-                if event_type == "response.failed":
-                    error_obj = None
-                    response_obj = event.get("response", {})
-                    if isinstance(response_obj, dict):
-                        error_obj = response_obj.get("error")
-                    error_obj = error_obj or event.get("error")
+                error_obj = extract_stream_error(event)
+                if error_obj is not None:
                     yield encode_sse_json(
                         {"error": error_obj or {"message": "Upstream streaming failed."}}
                     )

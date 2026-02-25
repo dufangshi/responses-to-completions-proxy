@@ -21,6 +21,39 @@ def wants_usage_chunk(stream_options: dict[str, Any] | None) -> bool:
     return bool(stream_options and stream_options.get("include_usage"))
 
 
+def extract_stream_error(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = event.get("type")
+
+    if event_type == "response.failed":
+        response_obj = event.get("response", {})
+        if isinstance(response_obj, dict):
+            error_obj = response_obj.get("error")
+            if isinstance(error_obj, dict):
+                return error_obj
+        error_obj = event.get("error")
+        if isinstance(error_obj, dict):
+            return error_obj
+        return {"message": "Upstream streaming failed.", "type": "upstream_error"}
+
+    if event_type in {"error", "response.error"}:
+        error_obj = event.get("error")
+        if isinstance(error_obj, dict):
+            return error_obj
+        data_obj = event.get("data")
+        if isinstance(data_obj, dict):
+            nested = data_obj.get("error")
+            if isinstance(nested, dict):
+                return nested
+            message = data_obj.get("message")
+            if isinstance(message, str) and message.strip():
+                return {"message": message, "type": "upstream_error"}
+        if isinstance(error_obj, str) and error_obj.strip():
+            return {"message": error_obj, "type": "upstream_error"}
+        return {"message": "Upstream streaming error.", "type": "upstream_error"}
+
+    return None
+
+
 async def iter_upstream_sse_events(
     upstream_lines: AsyncIterator[str],
 ) -> AsyncIterator[dict[str, Any] | str]:
