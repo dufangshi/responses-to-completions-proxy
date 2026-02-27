@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+REASONING_EFFORT_MODEL = "gpt-5.3-codex"
+
 
 def _parse_model_map(raw_value: str) -> dict[str, str]:
     raw_value = raw_value.strip()
@@ -36,12 +39,34 @@ def _parse_reasoning_effort(raw_value: str) -> str | None:
     value = raw_value.strip().lower()
     if not value:
         return None
-    allowed_values = {"low", "medium", "high", "xhigh"}
-    if value not in allowed_values:
+    if value not in ALLOWED_REASONING_EFFORTS:
         raise ValueError(
             "DEFAULT_REASONING_EFFORT must be one of: low, medium, high, xhigh."
         )
     return value
+
+
+def _extract_model_reasoning_effort(model_name: str | None) -> tuple[str | None, str | None]:
+    if not isinstance(model_name, str):
+        return model_name, None
+
+    raw = model_name.strip()
+    if not raw:
+        return None, None
+
+    lowered = raw.lower()
+    for effort in ALLOWED_REASONING_EFFORTS:
+        suffix = f":{effort}"
+        if lowered.endswith(suffix):
+            base = raw[: -len(suffix)].strip()
+            if base:
+                return base, effort
+            return None, effort
+    return raw, None
+
+
+def _supports_reasoning_effort(model_name: str) -> bool:
+    return model_name.strip().lower() == REASONING_EFFORT_MODEL
 
 
 def _parse_bool(raw_value: str, default: bool = False) -> bool:
@@ -122,3 +147,16 @@ class Settings:
         if client_model:
             return client_model
         return self.default_upstream_model
+
+    def resolve_model_and_reasoning(self, client_model: str | None) -> tuple[str, str | None]:
+        model_name, inline_reasoning = _extract_model_reasoning_effort(client_model)
+        resolved_model = self.resolve_model(model_name)
+
+        reasoning_effort = inline_reasoning
+        if reasoning_effort is None:
+            reasoning_effort = self.default_reasoning_effort
+
+        if not _supports_reasoning_effort(resolved_model):
+            reasoning_effort = None
+
+        return resolved_model, reasoning_effort

@@ -61,6 +61,8 @@ print(response.output_text)
 说明：
 - SDK 的 `responses.create` 本质调用的是 `/responses`（不是 `/chat/completions`）。
 - 代理会接收并透传 `model` 参数；若你请求里不传 `model`，会自动回退到 `DEFAULT_UPSTREAM_MODEL`。
+- 支持在 `model` 末尾附加推理强度（仅 `gpt-5.3-codex`）：例如 `gpt-5.3-codex:high` / `gpt-5.3-codex:medium`。
+- 若解析后模型不是 `gpt-5.3-codex`，代理会自动移除 `reasoning` 参数，避免上游因不支持而报错。
 
 ## 一键启动（Public Git Package / GHCR）
 

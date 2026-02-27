@@ -155,11 +155,13 @@ async def create_chat_completion(
     settings = request.app.state.settings
 
     try:
-        resolved_model = settings.resolve_model(completion_request.model)
+        resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(
+            completion_request.model
+        )
         payload = build_chat_responses_payload(
             completion_request,
             resolved_model,
-            settings.default_reasoning_effort,
+            reasoning_effort,
         )
     except UnsupportedParameterError as exc:
         return JSONResponse(

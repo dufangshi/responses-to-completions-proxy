@@ -122,7 +122,13 @@ def _write_mock_upstream_script(path: Path) -> None:
         def build_response_object(payload: dict[str, Any]) -> dict[str, Any]:
             model = payload.get("model") or "mock-default-model"
             input_text = extract_input_text(payload.get("input"))
-            text = f"mock:{model}:{input_text}".strip(":")
+            reasoning = payload.get("reasoning")
+            reasoning_effort = None
+            if isinstance(reasoning, dict):
+                effort = reasoning.get("effort")
+                if isinstance(effort, str):
+                    reasoning_effort = effort
+            text = f"mock:{model}:{input_text}:effort={reasoning_effort or 'none'}".strip(":")
             created = int(time.time())
             return {
                 "id": f"resp_mock_{created}",
@@ -216,14 +222,44 @@ def _run_python_sdk_tests(proxy_base_url: str) -> None:
         input="sdk-python-mapped",
     )
     text_mapped = response_mapped.output_text or ""
-    _assert_contains(text_mapped, "mock:gpt-5.3-codex:sdk-python-mapped", "python responses mapped model")
+    _assert_contains(
+        text_mapped,
+        "mock:gpt-5.3-codex:sdk-python-mapped:effort=high",
+        "python responses mapped model",
+    )
 
     response_direct = client.responses.create(
         model="gpt-5.3-codex",
         input="sdk-python-direct",
     )
     text_direct = response_direct.output_text or ""
-    _assert_contains(text_direct, "mock:gpt-5.3-codex:sdk-python-direct", "python responses direct model")
+    _assert_contains(
+        text_direct,
+        "mock:gpt-5.3-codex:sdk-python-direct:effort=high",
+        "python responses direct model",
+    )
+
+    response_inline_effort = client.responses.create(
+        model="gpt-5.3-codex:medium",
+        input="sdk-python-inline-effort",
+    )
+    text_inline_effort = response_inline_effort.output_text or ""
+    _assert_contains(
+        text_inline_effort,
+        "mock:gpt-5.3-codex:sdk-python-inline-effort:effort=medium",
+        "python responses inline effort",
+    )
+
+    response_inline_unsupported = client.responses.create(
+        model="gpt-4o:high",
+        input="sdk-python-inline-unsupported",
+    )
+    text_inline_unsupported = response_inline_unsupported.output_text or ""
+    _assert_contains(
+        text_inline_unsupported,
+        "mock:gpt-4o:sdk-python-inline-unsupported:effort=none",
+        "python responses strip effort for non-codex",
+    )
 
     saw_delta = False
     stream = client.responses.create(
@@ -244,7 +280,33 @@ def _run_python_sdk_tests(proxy_base_url: str) -> None:
         messages=[{"role": "user", "content": "sdk-python-chat"}],
     )
     chat_text = (chat.choices[0].message.content or "") if chat.choices else ""
-    _assert_contains(chat_text, "mock:gpt-5.3-codex:sdk-python-chat", "python chat completion")
+    _assert_contains(
+        chat_text,
+        "mock:gpt-5.3-codex:sdk-python-chat:effort=high",
+        "python chat completion",
+    )
+
+    chat_inline = client.chat.completions.create(
+        model="gpt-5.3-codex:low",
+        messages=[{"role": "user", "content": "sdk-python-chat-inline"}],
+    )
+    chat_inline_text = (chat_inline.choices[0].message.content or "") if chat_inline.choices else ""
+    _assert_contains(
+        chat_inline_text,
+        "mock:gpt-5.3-codex:sdk-python-chat-inline:effort=low",
+        "python chat inline effort",
+    )
+
+    chat_non_codex = client.chat.completions.create(
+        model="gpt-4o:high",
+        messages=[{"role": "user", "content": "sdk-python-chat-non-codex"}],
+    )
+    chat_non_codex_text = (chat_non_codex.choices[0].message.content or "") if chat_non_codex.choices else ""
+    _assert_contains(
+        chat_non_codex_text,
+        "mock:gpt-4o:sdk-python-chat-non-codex:effort=none",
+        "python chat strip effort for non-codex",
+    )
 
 
 def _ensure_node_sdk_installed() -> None:
@@ -274,7 +336,7 @@ def _run_node_sdk_tests(proxy_base_url: str) -> None:
               input: "sdk-node-mapped",
             });
             assert.ok(
-              (explicitResp.output_text || "").includes("mock:gpt-5.3-codex:sdk-node-mapped"),
+              (explicitResp.output_text || "").includes("mock:gpt-5.3-codex:sdk-node-mapped:effort=high"),
               "node responses mapped model failed",
             );
 
@@ -283,8 +345,26 @@ def _run_node_sdk_tests(proxy_base_url: str) -> None:
               input: "sdk-node-direct",
             });
             assert.ok(
-              (directResp.output_text || "").includes("mock:gpt-5.3-codex:sdk-node-direct"),
+              (directResp.output_text || "").includes("mock:gpt-5.3-codex:sdk-node-direct:effort=high"),
               "node responses direct model failed",
+            );
+
+            const inlineResp = await client.responses.create({
+              model: "gpt-5.3-codex:xhigh",
+              input: "sdk-node-inline",
+            });
+            assert.ok(
+              (inlineResp.output_text || "").includes("mock:gpt-5.3-codex:sdk-node-inline:effort=xhigh"),
+              "node responses inline effort failed",
+            );
+
+            const nonCodexResp = await client.responses.create({
+              model: "gpt-4o:high",
+              input: "sdk-node-non-codex",
+            });
+            assert.ok(
+              (nonCodexResp.output_text || "").includes("mock:gpt-4o:sdk-node-non-codex:effort=none"),
+              "node responses strip effort for non-codex failed",
             );
 
             let sawDelta = false;
@@ -307,8 +387,28 @@ def _run_node_sdk_tests(proxy_base_url: str) -> None:
             });
             const content = chat.choices?.[0]?.message?.content || "";
             assert.ok(
-              content.includes("mock:gpt-5.3-codex:sdk-node-chat"),
+              content.includes("mock:gpt-5.3-codex:sdk-node-chat:effort=high"),
               "node chat completion failed",
+            );
+
+            const chatInline = await client.chat.completions.create({
+              model: "gpt-5.3-codex:medium",
+              messages: [{ role: "user", content: "sdk-node-chat-inline" }],
+            });
+            const chatInlineContent = chatInline.choices?.[0]?.message?.content || "";
+            assert.ok(
+              chatInlineContent.includes("mock:gpt-5.3-codex:sdk-node-chat-inline:effort=medium"),
+              "node chat inline effort failed",
+            );
+
+            const chatNonCodex = await client.chat.completions.create({
+              model: "gpt-4o:high",
+              messages: [{ role: "user", content: "sdk-node-chat-non-codex" }],
+            });
+            const chatNonCodexContent = chatNonCodex.choices?.[0]?.message?.content || "";
+            assert.ok(
+              chatNonCodexContent.includes("mock:gpt-4o:sdk-node-chat-non-codex:effort=none"),
+              "node chat strip effort for non-codex failed",
             );
 
             console.log("node sdk tests passed");
@@ -379,7 +479,11 @@ def main() -> int:
             fallback_response.raise_for_status()
             fallback_json = fallback_response.json()
             fallback_text = _extract_input_text(fallback_json.get("output", []))
-            _assert_contains(fallback_text, "mock:gpt-5.3-codex:sdk-http-default", "http default model fallback")
+            _assert_contains(
+                fallback_text,
+                "mock:gpt-5.3-codex:sdk-http-default:effort=high",
+                "http default model fallback",
+            )
             print("http default model fallback passed")
 
             _run_python_sdk_tests(proxy_base_url)
