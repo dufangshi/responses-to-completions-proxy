@@ -8,6 +8,14 @@
 - `/v1/models` 和 `/models`
 - `stream=false` 与 `stream=true`
 
+## 快速跳转
+
+- [三种入口对应关系](#api-entry-map)
+- [`/v1/completions` 详细调用](#api-completions)
+- [`/v1/chat/completions` 详细调用](#api-chat-completions)
+- [`/v1/responses` 详细调用（OpenAI SDK）](#api-responses)
+- [容器镜像更新与重启](#docker-upgrade)
+
 ## 一键启动（Docker）
 
 先准备 `.env`（至少填好 `UPSTREAM_BASE_URL` 和 `UPSTREAM_API_KEY`），然后执行：
@@ -18,9 +26,94 @@ docker compose up -d --build
 
 启动后服务地址：`http://127.0.0.1:18010`
 
-## OpenAI SDK 兼容（Responses API）
+<a id="api-entry-map"></a>
+## 三种入口对应关系
 
-本代理已支持 OpenAI 官方 SDK 的 `responses.create` 调用路径（`POST /v1/responses`），可直接把 `baseURL` 指向本代理：
+| 入口 | 代码位置 | 主要用途 | 推荐使用场景 |
+| --- | --- | --- | --- |
+| `/v1/completions` | `app/routes/completions.py` | 兼容老式 Text Completions（`prompt`） | 旧客户端、仅文本续写 |
+| `/v1/chat/completions` | `app/routes/chat_completions.py` | 兼容 Chat Completions（`messages`） | 现有 chat 客户端、工具调用 |
+| `/v1/responses` | `app/routes/responses.py` | 直连 Responses API（新 SDK 原生） | OpenAI 官方 SDK（推荐） |
+
+模型参数规则（三个入口通用）：
+- 支持在 `model` 末尾附加推理强度（仅 `gpt-5.3-codex`）：`gpt-5.3-codex:low|medium|high|xhigh`
+- 若解析后模型不是 `gpt-5.3-codex`，代理会自动移除 `reasoning` 参数，避免上游报错
+- 若请求里不传 `model`（主要是 `/v1/responses`），会回退到 `DEFAULT_UPSTREAM_MODEL`
+
+<a id="api-completions"></a>
+## `/v1/completions` 详细调用
+
+请求特点：
+- 入参核心是 `prompt`
+- 返回是 `choices[].text`
+- 适合兼容老接口
+
+示例（curl）：
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer test-local' \
+  -d '{
+    "model":"gpt-5.3-codex:high",
+    "prompt":"hello",
+    "max_tokens":64,
+    "stream":false
+  }' | python -m json.tool
+```
+
+流式示例：
+
+```bash
+curl -N http://127.0.0.1:18010/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"gpt-5.3-codex:medium",
+    "prompt":"hello",
+    "stream":true
+  }'
+```
+
+<a id="api-chat-completions"></a>
+## `/v1/chat/completions` 详细调用
+
+请求特点：
+- 入参核心是 `messages`
+- 返回是 `choices[].message`
+- 支持工具调用（`tools` / `tool_choice`）
+
+示例（curl）：
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer test-local' \
+  -d '{
+    "model":"gpt-5.3-codex:high",
+    "messages":[{"role":"user","content":"hello"}],
+    "max_tokens":64,
+    "stream":false
+  }' | python -m json.tool
+```
+
+流式示例：
+
+```bash
+curl -N http://127.0.0.1:18010/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"gpt-5.3-codex:high",
+    "messages":[{"role":"user","content":"hello"}],
+    "stream":true
+  }'
+```
+
+<a id="api-responses"></a>
+## `/v1/responses` 详细调用（OpenAI SDK）
+
+说明：
+- OpenAI 官方 SDK 的 `responses.create(...)` 本质调用的是 `/responses`
+- 这是当前推荐入口（与官方新接口一致）
 
 ### JavaScript / TypeScript
 
@@ -33,7 +126,7 @@ const client = new OpenAI({
 });
 
 const response = await client.responses.create({
-  model: "gpt-5.3-codex",
+  model: "gpt-5.3-codex:high",
   input: "Write a short bedtime story about a unicorn.",
 });
 
@@ -51,18 +144,24 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-5.3-codex",
+    model="gpt-5.3-codex:high",
     input="Write a short bedtime story about a unicorn.",
 )
 
 print(response.output_text)
 ```
 
-说明：
-- SDK 的 `responses.create` 本质调用的是 `/responses`（不是 `/chat/completions`）。
-- 代理会接收并透传 `model` 参数；若你请求里不传 `model`，会自动回退到 `DEFAULT_UPSTREAM_MODEL`。
-- 支持在 `model` 末尾附加推理强度（仅 `gpt-5.3-codex`）：例如 `gpt-5.3-codex:high` / `gpt-5.3-codex:medium`。
-- 若解析后模型不是 `gpt-5.3-codex`，代理会自动移除 `reasoning` 参数，避免上游因不支持而报错。
+### 直接 HTTP 示例（不依赖 SDK）
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/responses \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer test-local' \
+  -d '{
+    "model":"gpt-5.3-codex:high",
+    "input":"Write a short bedtime story about a unicorn."
+  }' | python -m json.tool
+```
 
 ## 一键启动（Public Git Package / GHCR）
 
@@ -73,6 +172,44 @@ docker run -d --name completions-proxy \
   --env-file .env \
   -p 18010:18010 \
   ghcr.io/dufangshi/responses-to-completions-proxy:latest
+```
+
+<a id="docker-upgrade"></a>
+## 容器镜像更新与重启
+
+### 方式 A：docker compose（推荐）
+
+在项目目录执行：
+
+```bash
+cd /path/to/chat_complete_proxy
+docker compose pull completions-proxy
+docker compose up -d --no-build completions-proxy
+```
+
+如果你需要固定到某个版本标签（例如 `v1.2.3`），建议使用下方“方式 B”并把镜像写成：
+`ghcr.io/dufangshi/responses-to-completions-proxy:v1.2.3`。
+
+### 方式 B：docker run 直接重建容器
+
+```bash
+docker pull ghcr.io/dufangshi/responses-to-completions-proxy:latest
+docker rm -f completions-proxy || true
+docker run -d --name completions-proxy \
+  --restart unless-stopped \
+  --env-file .env \
+  -e APP_HOST=0.0.0.0 \
+  -e APP_PORT=18010 \
+  -p 18010:18010 \
+  -v "$(pwd)/logs:/app/logs" \
+  ghcr.io/dufangshi/responses-to-completions-proxy:latest
+```
+
+更新后可用以下命令确认：
+
+```bash
+docker ps --filter name=completions-proxy
+curl -sS http://127.0.0.1:18010/healthz
 ```
 
 ## OpenClaw 对接教程（Custom Provider）
