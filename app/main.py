@@ -10,6 +10,7 @@ from app.config import Settings
 from app.routes.chat_completions import router as chat_completions_router
 from app.routes.completions import router as completions_router
 from app.routes.models import router as models_router
+from app.routes.responses import router as responses_router
 from app.services.raw_io_logger import RawIOLogger
 from app.services.request_context import reset_current_request_id, set_current_request_id
 from app.services.responses_client import OpenAIResponsesGateway
@@ -38,6 +39,7 @@ app = FastAPI(
 app.include_router(completions_router)
 app.include_router(chat_completions_router)
 app.include_router(models_router)
+app.include_router(responses_router)
 
 
 @app.middleware("http")

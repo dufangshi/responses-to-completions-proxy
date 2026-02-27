@@ -4,6 +4,7 @@
 支持：
 - `/v1/completions` 和 `/completions`
 - `/v1/chat/completions` 和 `/chat/completions`
+- `/v1/responses` 和 `/responses`
 - `/v1/models` 和 `/models`
 - `stream=false` 与 `stream=true`
 
@@ -16,6 +17,50 @@ docker compose up -d --build
 ```
 
 启动后服务地址：`http://127.0.0.1:18010`
+
+## OpenAI SDK 兼容（Responses API）
+
+本代理已支持 OpenAI 官方 SDK 的 `responses.create` 调用路径（`POST /v1/responses`），可直接把 `baseURL` 指向本代理：
+
+### JavaScript / TypeScript
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:18010/v1",
+  apiKey: "111",
+});
+
+const response = await client.responses.create({
+  model: "gpt-5.3-codex",
+  input: "Write a short bedtime story about a unicorn.",
+});
+
+console.log(response.output_text);
+```
+
+### Python
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:18010/v1",
+    api_key="111",
+)
+
+response = client.responses.create(
+    model="gpt-5.3-codex",
+    input="Write a short bedtime story about a unicorn.",
+)
+
+print(response.output_text)
+```
+
+说明：
+- SDK 的 `responses.create` 本质调用的是 `/responses`（不是 `/chat/completions`）。
+- 代理会接收并透传 `model` 参数；若你请求里不传 `model`，会自动回退到 `DEFAULT_UPSTREAM_MODEL`。
 
 ## 一键启动（Public Git Package / GHCR）
 
