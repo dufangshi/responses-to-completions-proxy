@@ -13,7 +13,11 @@ from app.routes.models import router as models_router
 from app.routes.responses import router as responses_router
 from app.services.raw_io_logger import RawIOLogger
 from app.services.request_context import reset_current_request_id, set_current_request_id
-from app.services.responses_client import OpenAIResponsesGateway
+from app.services.responses_client import (
+    GeminiResponsesGateway,
+    OpenAIResponsesGateway,
+    RoutingResponsesGateway,
+)
 
 logger = logging.getLogger("compat_proxy")
 
@@ -22,7 +26,14 @@ logger = logging.getLogger("compat_proxy")
 async def lifespan(app: FastAPI):
     settings = Settings.from_env()
     raw_logger = RawIOLogger.from_settings(settings)
-    gateway = OpenAIResponsesGateway(settings, raw_logger=raw_logger)
+    openai_gateway = OpenAIResponsesGateway(settings, raw_logger=raw_logger)
+    gemini_gateway = GeminiResponsesGateway(settings, raw_logger=raw_logger)
+    gateway = RoutingResponsesGateway(
+        settings=settings,
+        openai_gateway=openai_gateway,
+        gemini_gateway=gemini_gateway,
+        raw_logger=raw_logger,
+    )
     app.state.settings = settings
     app.state.raw_io_logger = raw_logger
     app.state.responses_gateway = gateway

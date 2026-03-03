@@ -1,6 +1,8 @@
 # Completions Compatibility Proxy
 
-这个服务提供老接口 `POST /v1/completions`，并转发到上游 `POST /v1/responses`。
+这个服务提供老接口 `POST /v1/completions`，并统一兼容转发到上游：
+- OpenAI 上游（`/responses`）
+- Gemini 上游（`/models/{model}:generateContent` / `streamGenerateContent`）
 支持：
 - `/v1/completions` 和 `/completions`
 - `/v1/chat/completions` 和 `/chat/completions`
@@ -269,14 +271,43 @@ uv sync
 - `APP_PORT=18010`（不常用端口）
 - `UPSTREAM_BASE_URL`
 - `UPSTREAM_API_KEY`
+- `UPSTREAM_GEMINI_BASE_URL`
+- `UPSTREAM_GEMINI_API_KEY`
 - `DEFAULT_UPSTREAM_MODEL`
 - `DEFAULT_REASONING_EFFORT`（默认 `high`，可选：`low` / `medium` / `high` / `xhigh`）
+- `OPENAI_MODEL_PREFIXES`（默认：`gpt-,o1,o3,o4,text-embedding,text-moderation,whisper,tts,dall-e,omni`）
 - `RAW_IO_LOG_ENABLED`（调试开关，`true` 时记录原始请求/响应）
 - `RAW_IO_LOG_PATH`（默认 `logs/raw_io.jsonl`）
 - `RAW_IO_LOG_MAX_CHARS`（每个字符串字段最大记录长度）
 - `RAW_IO_LOG_KEEP_REQUESTS`（默认 `10`，仅保留最近 N 次请求的日志）
 
 如果要改配置，直接编辑项目根目录 `.env`。
+
+### OpenAI / Gemini 自动路由规则
+
+- 代理先解析 `model`（包括你之前支持的 `gpt-5.3-codex:high` 这种推理后缀）
+- 若模型前缀命中 `OPENAI_MODEL_PREFIXES`，走 `UPSTREAM_BASE_URL`（OpenAI 上游）
+- 其他模型默认走 `UPSTREAM_GEMINI_BASE_URL`（Gemini 上游）
+- 当目标模型不是 `gpt-5.3-codex` 时，会自动移除 `reasoning` 参数，避免上游报错
+- 为避免客户端 `max_tokens/max_output_tokens` 配错，代理在 Gemini 常用模型上会固定使用模型上限值请求上游
+- `gpt-5.3-codex` 在当前上游兼容模式下不透传 `max_output_tokens`（避免上游 `Unsupported parameter` 报错）
+
+### 常用模型限额（代理内置）
+
+- `gpt-5.3-codex`: `contextWindow=400000`，`maxTokens=128000`
+- `gemini-3-flash-preview`: `contextWindow=1048576`，`maxTokens=65536`
+- `gemini-3.1-pro-preview`: `contextWindow=1048576`，`maxTokens=65536`
+
+这些值会用于 `/v1/models` 返回，并用于 Gemini 上游请求时的 `max_output_tokens` 防越界修正。
+
+示例（Gemini）：
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/responses \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer test-local' \
+  -d '{"model":"gemini-3.1-pro-preview","input":"hello"}' | python -m json.tool
+```
 
 ## 启动
 
@@ -312,4 +343,12 @@ curl -sS http://127.0.0.1:18010/v1/chat/completions \
 curl -N http://127.0.0.1:18010/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-5.3-codex","messages":[{"role":"user","content":"hello"}],"stream":true}'
+```
+
+## Gemini 兼容层回归测试
+
+包含 Python SDK + Node SDK + 工具调用 + 流式 + 重试场景的本地集成测试：
+
+```bash
+python scripts/test_gemini_sdk_e2e.py
 ```

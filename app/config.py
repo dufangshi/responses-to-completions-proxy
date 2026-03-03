@@ -96,16 +96,29 @@ def _parse_non_negative_int(raw_value: str, default: int) -> int:
     return parsed
 
 
+def _parse_csv(raw_value: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = raw_value.strip()
+    if not value:
+        return default
+    parts = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    if not parts:
+        return default
+    return parts
+
+
 @dataclass(slots=True)
 class Settings:
     app_host: str
     app_port: int
     upstream_base_url: str
     upstream_api_key: str
+    upstream_gemini_base_url: str
+    upstream_gemini_api_key: str
     upstream_timeout_seconds: float
     default_upstream_model: str
     default_reasoning_effort: str | None
     model_map: dict[str, str]
+    openai_model_prefixes: tuple[str, ...]
     raw_io_log_enabled: bool
     raw_io_log_path: str
     raw_io_log_max_chars: int
@@ -123,12 +136,35 @@ class Settings:
                 "UPSTREAM_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),
             upstream_api_key=os.getenv("UPSTREAM_API_KEY", ""),
+            upstream_gemini_base_url=os.getenv(
+                "UPSTREAM_GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta",
+            ).rstrip("/"),
+            upstream_gemini_api_key=os.getenv("UPSTREAM_GEMINI_API_KEY", ""),
             upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")),
             default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.3-codex"),
             default_reasoning_effort=_parse_reasoning_effort(
                 os.getenv("DEFAULT_REASONING_EFFORT", "high")
             ),
             model_map=model_map,
+            openai_model_prefixes=_parse_csv(
+                os.getenv(
+                    "OPENAI_MODEL_PREFIXES",
+                    "gpt-,o1,o3,o4,text-embedding,text-moderation,whisper,tts,dall-e,omni",
+                ),
+                default=(
+                    "gpt-",
+                    "o1",
+                    "o3",
+                    "o4",
+                    "text-embedding",
+                    "text-moderation",
+                    "whisper",
+                    "tts",
+                    "dall-e",
+                    "omni",
+                ),
+            ),
             raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
             raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),
             raw_io_log_max_chars=_parse_positive_int(
@@ -160,3 +196,9 @@ class Settings:
             reasoning_effort = None
 
         return resolved_model, reasoning_effort
+
+    def is_openai_model(self, model_name: str) -> bool:
+        normalized = model_name.strip().lower()
+        if not normalized:
+            return True
+        return any(normalized.startswith(prefix) for prefix in self.openai_model_prefixes)

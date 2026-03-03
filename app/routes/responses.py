@@ -32,6 +32,9 @@ def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[
     else:
         normalized.pop("reasoning", None)
 
+    if "codex" in resolved_model.lower():
+        normalized.pop("max_output_tokens", None)
+
     return normalized
 
 

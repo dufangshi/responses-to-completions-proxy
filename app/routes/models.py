@@ -5,21 +5,13 @@ import time
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from app.services.model_limits import resolve_model_limits
+
 router = APIRouter()
 
-MODEL_LIMIT_HINTS: dict[str, tuple[int, int]] = {
-    "gpt-5.3-codex": (400_000, 128_000),
-}
-
-DEFAULT_CONTEXT_WINDOW = 200_000
-DEFAULT_MAX_TOKENS = 8_192
-
-
 def _resolve_limits(model_id: str) -> tuple[int, int]:
-    normalized = model_id.strip().lower()
-    if normalized in MODEL_LIMIT_HINTS:
-        return MODEL_LIMIT_HINTS[normalized]
-    return DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS
+    limits = resolve_model_limits(model_id)
+    return limits.context_window, limits.max_output_tokens
 
 
 def _build_model_object(model_id: str) -> dict:
