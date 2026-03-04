@@ -28,7 +28,7 @@ curl -sS http://127.0.0.1:18010/healthz
 
 ```env
 UPSTREAM_BASE_URL=https://sub.lnz-study.com
-UPSTREAM__OPENAI_API_KEY=sk-xxx
+UPSTREAM_OPENAI_API_KEY=sk-xxx
 UPSTREAM_ANTIGRAVITY_API_KEY=sk-xxx
 ```
 
@@ -80,7 +80,7 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 cp .env .env.bak.$(date +%Y%m%d-%H%M%S)
 
 # 旧键名 -> 新键名
-sed -i '' 's/^UPSTREAM_API_KEY=/UPSTREAM__OPENAI_API_KEY=/' .env
+sed -i '' 's/^UPSTREAM_API_KEY=/UPSTREAM_OPENAI_API_KEY=/' .env
 sed -i '' 's/^UPSTREAM_GEMINI_API_KEY=/UPSTREAM_ANTIGRAVITY_API_KEY=/' .env
 sed -i '' 's/^GEMINI_MIN_REQUEST_INTERVAL_SECONDS=/ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS=/' .env
 sed -i '' 's/^GEMINI_FALLBACK_MODEL=/ANTIGRAVITY_FALLBACK_MODEL=/' .env
@@ -88,7 +88,7 @@ sed -i '' 's/^GEMINI_FALLBACK_MODEL=/ANTIGRAVITY_FALLBACK_MODEL=/' .env
 
 如果是 Linux（GNU sed），把 `sed -i ''` 改为 `sed -i`。
 
-兼容性说明：当前版本仍兼容旧键名读取，但建议尽快迁移为新键名。
+兼容性说明：当前版本不兼容旧键名；若仍使用旧键名，服务会在启动时直接报错退出。
 
 ---
 

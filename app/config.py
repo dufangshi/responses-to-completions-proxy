@@ -208,24 +208,20 @@ class Settings:
             os.getenv("UPSTREAM_ANTIGRAVITY_BASE_URL", "").strip() or upstream_root,
             "/antigravity",
         )
-        openai_api_key = (
-            os.getenv("UPSTREAM__OPENAI_API_KEY", "").strip()
-            or os.getenv("UPSTREAM_API_KEY", "").strip()
-        )
-        antigravity_api_key = (
-            os.getenv("UPSTREAM_ANTIGRAVITY_API_KEY", "").strip()
-            or os.getenv("UPSTREAM_GEMINI_API_KEY", "").strip()
-        )
-        antigravity_interval_raw = (
-            os.getenv("ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS", "").strip()
-            or os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "").strip()
-            or "10"
-        )
-        antigravity_fallback_raw = (
-            os.getenv("ANTIGRAVITY_FALLBACK_MODEL", "").strip()
-            or os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
-            or "gemini-3-flash-preview"
-        )
+        openai_api_key = os.getenv("UPSTREAM_OPENAI_API_KEY", "").strip()
+        if not openai_api_key:
+            raise ValueError("UPSTREAM_OPENAI_API_KEY is required.")
+
+        antigravity_api_key = os.getenv("UPSTREAM_ANTIGRAVITY_API_KEY", "").strip()
+        if not antigravity_api_key:
+            raise ValueError("UPSTREAM_ANTIGRAVITY_API_KEY is required.")
+
+        antigravity_interval_raw = os.getenv(
+            "ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS", "10"
+        ).strip()
+        antigravity_fallback_raw = os.getenv(
+            "ANTIGRAVITY_FALLBACK_MODEL", "gemini-3-flash-preview"
+        ).strip()
         return cls(
             app_host=os.getenv("APP_HOST", "127.0.0.1"),
             app_port=int(os.getenv("APP_PORT", "18010")),
