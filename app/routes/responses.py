@@ -11,6 +11,30 @@ from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 router = APIRouter()
 
 
+def _normalize_responses_input(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    raw_input = normalized.get("input")
+
+    if isinstance(raw_input, str):
+        normalized["input"] = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": raw_input}],
+            }
+        ]
+        return normalized
+
+    if isinstance(raw_input, list) and raw_input and all(isinstance(item, str) for item in raw_input):
+        normalized["input"] = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": item}],
+            }
+            for item in raw_input
+        ]
+    return normalized
+
+
 def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     normalized = dict(payload)
@@ -32,6 +56,12 @@ def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[
     else:
         normalized.pop("reasoning", None)
 
+    normalized = _normalize_responses_input(normalized)
+
+    instructions = normalized.get("instructions")
+    if "codex" in resolved_model.lower():
+        if not isinstance(instructions, str) or not instructions.strip():
+            normalized["instructions"] = "You are a helpful assistant."
     if "codex" in resolved_model.lower():
         normalized.pop("max_output_tokens", None)
 

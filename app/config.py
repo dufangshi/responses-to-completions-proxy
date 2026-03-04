@@ -102,7 +102,7 @@ def _parse_non_negative_float(raw_value: str, default: float) -> float:
         return default
     parsed = float(value)
     if parsed < 0:
-        raise ValueError("GEMINI_MIN_REQUEST_INTERVAL_SECONDS must be >= 0.")
+        raise ValueError("ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS must be >= 0.")
     return parsed
 
 
@@ -123,6 +123,53 @@ def _parse_optional_str(raw_value: str) -> str | None:
     return value
 
 
+def _ensure_url_suffix(base_url: str, suffix: str) -> str:
+    normalized_base = base_url.strip().rstrip("/")
+    normalized_suffix = suffix.strip()
+    if not normalized_suffix:
+        return normalized_base
+    if not normalized_suffix.startswith("/"):
+        normalized_suffix = f"/{normalized_suffix}"
+    if normalized_base.endswith(normalized_suffix):
+        return normalized_base
+    return f"{normalized_base}{normalized_suffix}"
+
+
+def _derive_upstream_root(raw_base_url: str) -> str:
+    normalized = raw_base_url.strip().rstrip("/")
+    if not normalized:
+        return normalized
+    for suffix in ("/v1", "/v1beta", "/antigravity"):
+        if normalized.endswith(suffix):
+            trimmed = normalized[: -len(suffix)].rstrip("/")
+            if trimmed:
+                return trimmed
+    return normalized
+
+
+def _parse_force_model_list(raw_value: str) -> tuple[str, ...]:
+    value = raw_value.strip()
+    if not value:
+        return ()
+
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                models = tuple(str(item).strip() for item in parsed if str(item).strip())
+                if models:
+                    return models
+        except json.JSONDecodeError:
+            inner = value.strip("[]").strip()
+            if not inner:
+                return ()
+            return tuple(
+                part.strip().strip("\"'") for part in inner.split(",") if part.strip().strip("\"'")
+            )
+
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
 @dataclass(slots=True)
 class Settings:
     app_host: str
@@ -134,6 +181,8 @@ class Settings:
     upstream_timeout_seconds: float
     gemini_min_request_interval_seconds: float
     gemini_fallback_model: str | None
+    use_force_model: bool
+    force_upstream_models: tuple[str, ...]
     default_upstream_model: str
     default_reasoning_effort: str | None
     model_map: dict[str, str]
@@ -148,25 +197,53 @@ class Settings:
         load_dotenv()
         raw_model_map = os.getenv("MODEL_MAP", "")
         model_map = _parse_model_map(raw_model_map)
+        upstream_root = _derive_upstream_root(
+            os.getenv("UPSTREAM_BASE_URL", "https://api.openai.com")
+        )
+        openai_base_url = _ensure_url_suffix(
+            os.getenv("UPSTREAM_OPENAI_BASE_URL", "").strip() or upstream_root,
+            "/v1",
+        )
+        antigravity_base_url = _ensure_url_suffix(
+            os.getenv("UPSTREAM_ANTIGRAVITY_BASE_URL", "").strip() or upstream_root,
+            "/antigravity",
+        )
+        openai_api_key = (
+            os.getenv("UPSTREAM__OPENAI_API_KEY", "").strip()
+            or os.getenv("UPSTREAM_API_KEY", "").strip()
+        )
+        antigravity_api_key = (
+            os.getenv("UPSTREAM_ANTIGRAVITY_API_KEY", "").strip()
+            or os.getenv("UPSTREAM_GEMINI_API_KEY", "").strip()
+        )
+        antigravity_interval_raw = (
+            os.getenv("ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS", "").strip()
+            or os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "").strip()
+            or "10"
+        )
+        antigravity_fallback_raw = (
+            os.getenv("ANTIGRAVITY_FALLBACK_MODEL", "").strip()
+            or os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+            or "gemini-3-flash-preview"
+        )
         return cls(
             app_host=os.getenv("APP_HOST", "127.0.0.1"),
             app_port=int(os.getenv("APP_PORT", "18010")),
-            upstream_base_url=os.getenv(
-                "UPSTREAM_BASE_URL", "https://api.openai.com/v1"
-            ).rstrip("/"),
-            upstream_api_key=os.getenv("UPSTREAM_API_KEY", ""),
-            upstream_gemini_base_url=os.getenv(
-                "UPSTREAM_GEMINI_BASE_URL",
-                "https://generativelanguage.googleapis.com/v1beta",
-            ).rstrip("/"),
-            upstream_gemini_api_key=os.getenv("UPSTREAM_GEMINI_API_KEY", ""),
+            upstream_base_url=openai_base_url,
+            upstream_api_key=openai_api_key,
+            upstream_gemini_base_url=antigravity_base_url,
+            upstream_gemini_api_key=antigravity_api_key,
             upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")),
             gemini_min_request_interval_seconds=_parse_non_negative_float(
-                os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "10"),
+                antigravity_interval_raw,
                 default=10.0,
             ),
             gemini_fallback_model=_parse_optional_str(
-                os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3-flash-preview")
+                antigravity_fallback_raw
+            ),
+            use_force_model=_parse_bool(os.getenv("USE_FORCE_MODEL", ""), default=False),
+            force_upstream_models=_parse_force_model_list(
+                os.getenv("FORCE_UPSTREAM_MODEL", "")
             ),
             default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.3-codex"),
             default_reasoning_effort=_parse_reasoning_effort(
@@ -204,6 +281,8 @@ class Settings:
         )
 
     def resolve_model(self, client_model: str | None) -> str:
+        if self.use_force_model and self.force_upstream_models:
+            return self.force_upstream_models[0]
         if client_model and client_model in self.model_map:
             return self.model_map[client_model]
         if client_model:
@@ -228,3 +307,16 @@ class Settings:
         if not normalized:
             return True
         return any(normalized.startswith(prefix) for prefix in self.openai_model_prefixes)
+
+    def force_model_chain(self) -> tuple[str, ...]:
+        if not self.use_force_model:
+            return ()
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for model in self.force_upstream_models:
+            normalized = model.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(model.strip())
+        return tuple(deduped)
