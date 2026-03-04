@@ -96,6 +96,16 @@ def _parse_non_negative_int(raw_value: str, default: int) -> int:
     return parsed
 
 
+def _parse_non_negative_float(raw_value: str, default: float) -> float:
+    value = raw_value.strip()
+    if not value:
+        return default
+    parsed = float(value)
+    if parsed < 0:
+        raise ValueError("GEMINI_MIN_REQUEST_INTERVAL_SECONDS must be >= 0.")
+    return parsed
+
+
 def _parse_csv(raw_value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     value = raw_value.strip()
     if not value:
@@ -104,6 +114,13 @@ def _parse_csv(raw_value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     if not parts:
         return default
     return parts
+
+
+def _parse_optional_str(raw_value: str) -> str | None:
+    value = raw_value.strip()
+    if not value:
+        return None
+    return value
 
 
 @dataclass(slots=True)
@@ -115,6 +132,8 @@ class Settings:
     upstream_gemini_base_url: str
     upstream_gemini_api_key: str
     upstream_timeout_seconds: float
+    gemini_min_request_interval_seconds: float
+    gemini_fallback_model: str | None
     default_upstream_model: str
     default_reasoning_effort: str | None
     model_map: dict[str, str]
@@ -142,6 +161,13 @@ class Settings:
             ).rstrip("/"),
             upstream_gemini_api_key=os.getenv("UPSTREAM_GEMINI_API_KEY", ""),
             upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")),
+            gemini_min_request_interval_seconds=_parse_non_negative_float(
+                os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "10"),
+                default=10.0,
+            ),
+            gemini_fallback_model=_parse_optional_str(
+                os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3-flash-preview")
+            ),
             default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.3-codex"),
             default_reasoning_effort=_parse_reasoning_effort(
                 os.getenv("DEFAULT_REASONING_EFFORT", "high")

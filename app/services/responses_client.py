@@ -154,6 +154,9 @@ class GeminiResponsesGateway(BaseResponsesGateway):
     def __init__(self, settings: Settings, raw_logger: RawIOLogger | None = None):
         self._settings = settings
         self._raw_logger = raw_logger or RawIOLogger.from_settings(settings)
+        self._request_interval_seconds = float(settings.gemini_min_request_interval_seconds)
+        self._request_lock = asyncio.Lock()
+        self._last_request_started_at = 0.0
         self._client = httpx.AsyncClient(
             base_url=settings.upstream_gemini_base_url,
             timeout=settings.upstream_timeout_seconds,
@@ -164,8 +167,6 @@ class GeminiResponsesGateway(BaseResponsesGateway):
         )
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
-        model = _extract_model(payload)
-        normalized_payload = _normalize_max_output_tokens_for_model(payload, model)
         if not self._settings.upstream_gemini_api_key:
             raise UpstreamAPIError(
                 500,
@@ -178,133 +179,110 @@ class GeminiResponsesGateway(BaseResponsesGateway):
                     }
                 },
             )
+
+        requested_model = _extract_model(payload)
         try:
-            gemini_payload = build_gemini_request_from_responses(normalized_payload)
-        except GeminiAdapterError as exc:
-            raise UpstreamAPIError(
-                400,
-                {
-                    "error": {
-                        "message": str(exc),
-                        "type": "invalid_request_error",
-                        "param": None,
-                        "code": "invalid_gemini_request",
-                    }
-                },
-            ) from exc
-
-        path = f"/models/{model}:generateContent"
-        self._raw_logger.log(
-            "upstream.request",
-            {
-                "provider": "gemini",
-                "path": path,
-                "stream": False,
-                "payload": gemini_payload,
-            },
-        )
-        response = await self._post_with_retry(path=path, payload=gemini_payload)
-        self._raw_logger.log(
-            "upstream.response",
-            {
-                "provider": "gemini",
-                "path": path,
-                "stream": False,
-                "status_code": response.status_code,
-                "body": response.text,
-            },
-        )
-        if response.status_code >= 400:
-            raw_error = _safe_json(response)
-            raise UpstreamAPIError(response.status_code, gemini_error_to_openai_error(response.status_code, raw_error))
-
-        try:
-            parsed = response.json()
-        except ValueError:
-            raise UpstreamAPIError(
-                502,
-                {
-                    "error": {
-                        "message": "Gemini upstream returned non-JSON success response.",
-                        "type": "upstream_invalid_response",
-                        "param": None,
-                        "code": "invalid_upstream_response",
-                    }
-                },
-            ) from None
-
-        return gemini_response_to_openai_response(parsed, model=model)
-
-    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[str]:
-        model = _extract_model(payload)
-        normalized_payload = _normalize_max_output_tokens_for_model(payload, model)
-        if not self._settings.upstream_gemini_api_key:
-            raise UpstreamAPIError(
-                500,
-                {
-                    "error": {
-                        "message": "UPSTREAM_GEMINI_API_KEY is required for Gemini models.",
-                        "type": "server_error",
-                        "param": None,
-                        "code": "gemini_api_key_missing",
-                    }
-                },
+            return await self._create_response_for_model(
+                payload=payload,
+                target_model=requested_model,
+                response_model=requested_model,
             )
-        try:
-            gemini_payload = build_gemini_request_from_responses(normalized_payload)
-        except GeminiAdapterError as exc:
-            raise UpstreamAPIError(
-                400,
-                {
-                    "error": {
-                        "message": str(exc),
-                        "type": "invalid_request_error",
-                        "param": None,
-                        "code": "invalid_gemini_request",
-                    }
-                },
-            ) from exc
-
-        path = f"/models/{model}:streamGenerateContent?alt=sse"
-        self._raw_logger.log(
-            "upstream.request",
-            {
-                "provider": "gemini",
-                "path": path,
-                "stream": True,
-                "payload": gemini_payload,
-            },
-        )
-        request = self._client.build_request(
-            "POST",
-            path,
-            json=gemini_payload,
-            headers={"Accept": "text/event-stream"},
-        )
-        response = await self._send_with_retry(request)
-        self._raw_logger.log(
-            "upstream.response",
-            {
-                "provider": "gemini",
-                "path": path,
-                "stream": True,
-                "status_code": response.status_code,
-            },
-        )
-        if response.status_code >= 400:
-            body = await response.aread()
+        except UpstreamAPIError as primary_exc:
+            fallback_model = self._resolve_fallback_model(requested_model, primary_exc)
+            if not fallback_model:
+                raise
             self._raw_logger.log(
-                "upstream.response.error_body",
+                "upstream.fallback",
                 {
                     "provider": "gemini",
-                    "path": path,
-                    "stream": True,
-                    "status_code": response.status_code,
-                    "body": body.decode("utf-8", errors="replace"),
+                    "from_model": requested_model,
+                    "to_model": fallback_model,
+                    "status_code": primary_exc.status_code,
+                    "error": primary_exc.payload,
+                    "stream": False,
                 },
             )
-            await response.aclose()
-            raise UpstreamAPIError(response.status_code, gemini_error_to_openai_error(response.status_code, _safe_json(body)))
+            return await self._create_response_for_model(
+                payload=payload,
+                target_model=fallback_model,
+                response_model=requested_model,
+            )
+
+    async def _create_response_for_model(
+        self,
+        *,
+        payload: dict[str, Any],
+        target_model: str,
+        response_model: str,
+    ) -> dict[str, Any]:
+        normalized_payload = _normalize_max_output_tokens_for_model(payload, target_model)
+        path = f"/models/{target_model}:generateContent"
+        parsed = await self._perform_non_stream_request(
+            normalized_payload=normalized_payload,
+            path=path,
+            target_model=target_model,
+            response_model=response_model,
+        )
+
+        return gemini_response_to_openai_response(parsed, model=response_model)
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[str]:
+        if not self._settings.upstream_gemini_api_key:
+            raise UpstreamAPIError(
+                500,
+                {
+                    "error": {
+                        "message": "UPSTREAM_GEMINI_API_KEY is required for Gemini models.",
+                        "type": "server_error",
+                        "param": None,
+                        "code": "gemini_api_key_missing",
+                    }
+                },
+            )
+
+        requested_model = _extract_model(payload)
+        try:
+            return await self._stream_response_for_model(
+                payload=payload,
+                target_model=requested_model,
+                response_model=requested_model,
+            )
+        except UpstreamAPIError as primary_exc:
+            fallback_model = self._resolve_fallback_model(requested_model, primary_exc)
+            if not fallback_model:
+                raise
+            self._raw_logger.log(
+                "upstream.fallback",
+                {
+                    "provider": "gemini",
+                    "from_model": requested_model,
+                    "to_model": fallback_model,
+                    "status_code": primary_exc.status_code,
+                    "error": primary_exc.payload,
+                    "stream": True,
+                },
+            )
+            return await self._stream_response_for_model(
+                payload=payload,
+                target_model=fallback_model,
+                response_model=requested_model,
+            )
+
+    async def _stream_response_for_model(
+        self,
+        *,
+        payload: dict[str, Any],
+        target_model: str,
+        response_model: str,
+    ) -> AsyncIterator[str]:
+        normalized_payload = _normalize_max_output_tokens_for_model(payload, target_model)
+        path = f"/models/{target_model}:streamGenerateContent?alt=sse"
+        response = await self._perform_stream_request(
+            normalized_payload=normalized_payload,
+            path=path,
+            target_model=target_model,
+            response_model=response_model,
+        )
 
         async def iterator() -> AsyncIterator[str]:
             response_id = f"resp_{uuid.uuid4().hex}"
@@ -336,7 +314,7 @@ class GeminiResponsesGateway(BaseResponsesGateway):
                                     "id": response_id,
                                     "object": "response",
                                     "created_at": created_at,
-                                    "model": model,
+                                    "model": response_model,
                                 },
                             },
                             event_name="response.created",
@@ -393,7 +371,7 @@ class GeminiResponsesGateway(BaseResponsesGateway):
                 await response.aclose()
 
             completed_response = build_openai_response_from_stream_state(
-                model=model,
+                model=response_model,
                 response_id=response_id,
                 created_at=created_at,
                 full_text=accumulated_text,
@@ -414,8 +392,38 @@ class GeminiResponsesGateway(BaseResponsesGateway):
 
         return iterator()
 
+    def _resolve_fallback_model(self, requested_model: str, error: UpstreamAPIError) -> str | None:
+        fallback_model = self._settings.gemini_fallback_model
+        if not fallback_model:
+            return None
+        if fallback_model.strip().lower() == requested_model.strip().lower():
+            return None
+        if error.status_code in {429, 500, 502, 503, 504}:
+            return fallback_model
+
+        payload = error.payload
+        if isinstance(payload, dict):
+            error_obj = payload.get("error")
+            if isinstance(error_obj, dict):
+                message = error_obj.get("message")
+                if isinstance(message, str) and "No available Gemini accounts" in message:
+                    return fallback_model
+        return None
+
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def _wait_for_rate_slot(self) -> None:
+        if self._request_interval_seconds <= 0:
+            return
+        async with self._request_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_started_at
+            wait_seconds = self._request_interval_seconds - elapsed
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+                now = time.monotonic()
+            self._last_request_started_at = now
 
     async def _post_with_retry(self, *, path: str, payload: dict[str, Any]) -> httpx.Response:
         attempts = 3
@@ -463,6 +471,194 @@ class GeminiResponsesGateway(BaseResponsesGateway):
                 continue
             return response
         return await self._client.send(request, stream=True)
+
+    async def _perform_non_stream_request(
+        self,
+        *,
+        normalized_payload: dict[str, Any],
+        path: str,
+        target_model: str,
+        response_model: str,
+    ) -> dict[str, Any]:
+        tried_without_max = False
+        payload_variant = dict(normalized_payload)
+
+        while True:
+            try:
+                gemini_payload = build_gemini_request_from_responses(payload_variant)
+            except GeminiAdapterError as exc:
+                raise UpstreamAPIError(
+                    400,
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                            "param": None,
+                            "code": "invalid_gemini_request",
+                        }
+                    },
+                ) from exc
+
+            self._raw_logger.log(
+                "upstream.request",
+                {
+                    "provider": "gemini",
+                    "path": path,
+                    "stream": False,
+                    "target_model": target_model,
+                    "response_model": response_model,
+                    "payload": gemini_payload,
+                },
+            )
+            await self._wait_for_rate_slot()
+            response = await self._post_with_retry(path=path, payload=gemini_payload)
+            self._raw_logger.log(
+                "upstream.response",
+                {
+                    "provider": "gemini",
+                    "path": path,
+                    "stream": False,
+                    "status_code": response.status_code,
+                    "body": response.text,
+                },
+            )
+            if response.status_code >= 400:
+                raw_error = _safe_json(response)
+                if (
+                    not tried_without_max
+                    and "max_output_tokens" in payload_variant
+                    and _is_invalid_argument_error(response.status_code, raw_error)
+                ):
+                    tried_without_max = True
+                    payload_variant = dict(payload_variant)
+                    payload_variant.pop("max_output_tokens", None)
+                    self._raw_logger.log(
+                        "upstream.request.retry_without_max_output_tokens",
+                        {
+                            "provider": "gemini",
+                            "path": path,
+                            "target_model": target_model,
+                            "response_model": response_model,
+                            "status_code": response.status_code,
+                        },
+                    )
+                    continue
+                raise UpstreamAPIError(
+                    response.status_code,
+                    gemini_error_to_openai_error(response.status_code, raw_error),
+                )
+
+            try:
+                return response.json()
+            except ValueError:
+                raise UpstreamAPIError(
+                    502,
+                    {
+                        "error": {
+                            "message": "Gemini upstream returned non-JSON success response.",
+                            "type": "upstream_invalid_response",
+                            "param": None,
+                            "code": "invalid_upstream_response",
+                        }
+                    },
+                ) from None
+
+    async def _perform_stream_request(
+        self,
+        *,
+        normalized_payload: dict[str, Any],
+        path: str,
+        target_model: str,
+        response_model: str,
+    ) -> httpx.Response:
+        tried_without_max = False
+        payload_variant = dict(normalized_payload)
+
+        while True:
+            try:
+                gemini_payload = build_gemini_request_from_responses(payload_variant)
+            except GeminiAdapterError as exc:
+                raise UpstreamAPIError(
+                    400,
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                            "param": None,
+                            "code": "invalid_gemini_request",
+                        }
+                    },
+                ) from exc
+
+            self._raw_logger.log(
+                "upstream.request",
+                {
+                    "provider": "gemini",
+                    "path": path,
+                    "stream": True,
+                    "target_model": target_model,
+                    "response_model": response_model,
+                    "payload": gemini_payload,
+                },
+            )
+            request = self._client.build_request(
+                "POST",
+                path,
+                json=gemini_payload,
+                headers={"Accept": "text/event-stream"},
+            )
+            await self._wait_for_rate_slot()
+            response = await self._send_with_retry(request)
+            self._raw_logger.log(
+                "upstream.response",
+                {
+                    "provider": "gemini",
+                    "path": path,
+                    "stream": True,
+                    "status_code": response.status_code,
+                },
+            )
+            if response.status_code < 400:
+                return response
+
+            body = await response.aread()
+            self._raw_logger.log(
+                "upstream.response.error_body",
+                {
+                    "provider": "gemini",
+                    "path": path,
+                    "stream": True,
+                    "status_code": response.status_code,
+                    "body": body.decode("utf-8", errors="replace"),
+                },
+            )
+            await response.aclose()
+            raw_error = _safe_json(body)
+            if (
+                not tried_without_max
+                and "max_output_tokens" in payload_variant
+                and _is_invalid_argument_error(response.status_code, raw_error)
+            ):
+                tried_without_max = True
+                payload_variant = dict(payload_variant)
+                payload_variant.pop("max_output_tokens", None)
+                self._raw_logger.log(
+                    "upstream.request.retry_without_max_output_tokens",
+                    {
+                        "provider": "gemini",
+                        "path": path,
+                        "target_model": target_model,
+                        "response_model": response_model,
+                        "status_code": response.status_code,
+                        "stream": True,
+                    },
+                )
+                continue
+
+            raise UpstreamAPIError(
+                response.status_code,
+                gemini_error_to_openai_error(response.status_code, raw_error),
+            )
 
 
 class RoutingResponsesGateway(BaseResponsesGateway):
@@ -592,8 +788,56 @@ def _normalize_max_output_tokens_for_model(payload: dict[str, Any], model: str) 
         return payload
 
     normalized = dict(payload)
-    normalized["max_output_tokens"] = max_output_limit
+    if "max_output_tokens" not in normalized:
+        return normalized
+
+    raw_value = normalized.get("max_output_tokens")
+    if isinstance(raw_value, bool):
+        normalized.pop("max_output_tokens", None)
+        return normalized
+    if isinstance(raw_value, int):
+        value = raw_value
+    elif isinstance(raw_value, float):
+        value = int(raw_value)
+    elif isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            normalized.pop("max_output_tokens", None)
+            return normalized
+        try:
+            value = int(stripped)
+        except ValueError:
+            normalized.pop("max_output_tokens", None)
+            return normalized
+    else:
+        normalized.pop("max_output_tokens", None)
+        return normalized
+
+    if value < 1:
+        normalized.pop("max_output_tokens", None)
+        return normalized
+    if value > max_output_limit:
+        value = max_output_limit
+
+    normalized["max_output_tokens"] = value
     return normalized
+
+
+def _is_invalid_argument_error(status_code: int, payload: Any) -> bool:
+    if status_code != 400:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    error_obj = payload.get("error")
+    if not isinstance(error_obj, dict):
+        return False
+    code = error_obj.get("status")
+    if isinstance(code, str) and code.upper() == "INVALID_ARGUMENT":
+        return True
+    message = error_obj.get("message")
+    if isinstance(message, str) and "invalid argument" in message.lower():
+        return True
+    return False
 
 
 def _safe_json(response: httpx.Response | bytes) -> Any:

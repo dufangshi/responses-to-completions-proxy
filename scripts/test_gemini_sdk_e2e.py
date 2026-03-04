@@ -19,6 +19,7 @@ from openai import OpenAI
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE_TEST_DIR = Path("/tmp/openai-node-sdk-test")
 GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_FALLBACK_MODEL = "gemini-3-flash-preview"
 
 
 def _find_free_port() -> int:
@@ -72,7 +73,8 @@ def _write_mock_gemini_script(path: Path) -> None:
         from fastapi import FastAPI, Request
         from fastapi.responses import JSONResponse, StreamingResponse
 
-        MODEL = "gemini-3.1-pro-preview"
+        PRIMARY_MODEL = "gemini-3.1-pro-preview"
+        FALLBACK_MODEL = "gemini-3-flash-preview"
         app = FastAPI()
         retry_once_done = False
 
@@ -140,14 +142,14 @@ def _write_mock_gemini_script(path: Path) -> None:
 
         @app.get("/v1beta/models")
         async def list_models():
-            return {"models": [{"name": f"models/{MODEL}"}]}
+            return {"models": [{"name": f"models/{PRIMARY_MODEL}"}, {"name": f"models/{FALLBACK_MODEL}"}]}
 
 
         @app.post("/v1beta/models/{model}:generateContent")
         async def generate_content(model: str, request: Request):
             global retry_once_done
             payload = await request.json()
-            if model != MODEL:
+            if model not in {PRIMARY_MODEL, FALLBACK_MODEL}:
                 return _error(404, "Model not found", "NOT_FOUND")
 
             generation_config = payload.get("generationConfig")
@@ -164,6 +166,8 @@ def _write_mock_gemini_script(path: Path) -> None:
             user_text = _extract_user_text(payload)
             if "__force_503_once__" in user_text and not retry_once_done:
                 retry_once_done = True
+                return _error(503, "No available Gemini accounts: no available accounts", "INTERNAL")
+            if "__force_fallback__" in user_text and model == PRIMARY_MODEL:
                 return _error(503, "No available Gemini accounts: no available accounts", "INTERNAL")
 
             function_response = _find_function_response(payload)
@@ -207,10 +211,11 @@ def _write_mock_gemini_script(path: Path) -> None:
                 }
                 return JSONResponse(status_code=200, content=body)
 
+            text_prefix = "gemini-fallback-mock" if model == FALLBACK_MODEL else "gemini-mock"
             body["candidates"] = [
                 {
                     "finishReason": "STOP",
-                    "content": {"parts": [{"text": f"gemini-mock:{user_text}"}]},
+                    "content": {"parts": [{"text": f"{text_prefix}:{user_text}"}]},
                 }
             ]
             body["usageMetadata"] = {
@@ -224,7 +229,7 @@ def _write_mock_gemini_script(path: Path) -> None:
         @app.post("/v1beta/models/{model}:streamGenerateContent")
         async def stream_generate_content(model: str, request: Request):
             payload = await request.json()
-            if model != MODEL:
+            if model not in {PRIMARY_MODEL, FALLBACK_MODEL}:
                 return _error(404, "Model not found", "NOT_FOUND")
 
             user_text = _extract_user_text(payload)
@@ -304,6 +309,17 @@ def _run_python_sdk_tests(proxy_base_url: str) -> None:
     )
     retry_text = retry_response.output_text or ""
     _assert_contains(retry_text, "gemini-mock:__force_503_once__ hello", "python responses retry")
+
+    fallback_response = client.responses.create(
+        model=GEMINI_MODEL,
+        input="__force_fallback__ hello",
+    )
+    fallback_text = fallback_response.output_text or ""
+    _assert_contains(
+        fallback_text,
+        "gemini-fallback-mock:__force_fallback__ hello",
+        "python responses fallback model",
+    )
 
     bounded_response = client.responses.create(
         model=GEMINI_MODEL,
@@ -392,6 +408,18 @@ def _run_python_sdk_tests(proxy_base_url: str) -> None:
             break
     if not saw_stream_tool_call:
         raise AssertionError("python chat stream tool call delta missing")
+
+    fallback_chat = client.chat.completions.create(
+        model=GEMINI_MODEL,
+        messages=[{"role": "user", "content": "__force_fallback__ say hi"}],
+        max_tokens=64,
+    )
+    fallback_chat_text = (fallback_chat.choices[0].message.content or "") if fallback_chat.choices else ""
+    _assert_contains(
+        fallback_chat_text,
+        "gemini-fallback-mock:__force_fallback__ say hi",
+        "python chat fallback model",
+    )
 
     followup = client.chat.completions.create(
         model=GEMINI_MODEL,
@@ -600,6 +628,8 @@ def main() -> int:
                 "UPSTREAM_API_KEY": "test-openai-key",
                 "UPSTREAM_GEMINI_BASE_URL": f"http://127.0.0.1:{gemini_port}/v1beta",
                 "UPSTREAM_GEMINI_API_KEY": "test-gemini-key",
+                "GEMINI_MIN_REQUEST_INTERVAL_SECONDS": "0",
+                "GEMINI_FALLBACK_MODEL": GEMINI_FALLBACK_MODEL,
                 "DEFAULT_UPSTREAM_MODEL": "gpt-5.3-codex",
                 "DEFAULT_REASONING_EFFORT": "high",
                 "RAW_IO_LOG_ENABLED": "false",

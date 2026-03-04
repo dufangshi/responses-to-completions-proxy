@@ -273,6 +273,8 @@ uv sync
 - `UPSTREAM_API_KEY`
 - `UPSTREAM_GEMINI_BASE_URL`
 - `UPSTREAM_GEMINI_API_KEY`
+- `GEMINI_MIN_REQUEST_INTERVAL_SECONDS`（默认 `10`，Gemini 上游最小请求间隔，防止频率过高触发账号池限流）
+- `GEMINI_FALLBACK_MODEL`（默认 `gemini-3-flash-preview`，当 Gemini 主模型返回 429/5xx 时自动回退）
 - `DEFAULT_UPSTREAM_MODEL`
 - `DEFAULT_REASONING_EFFORT`（默认 `high`，可选：`low` / `medium` / `high` / `xhigh`）
 - `OPENAI_MODEL_PREFIXES`（默认：`gpt-,o1,o3,o4,text-embedding,text-moderation,whisper,tts,dall-e,omni`）
@@ -289,8 +291,10 @@ uv sync
 - 若模型前缀命中 `OPENAI_MODEL_PREFIXES`，走 `UPSTREAM_BASE_URL`（OpenAI 上游）
 - 其他模型默认走 `UPSTREAM_GEMINI_BASE_URL`（Gemini 上游）
 - 当目标模型不是 `gpt-5.3-codex` 时，会自动移除 `reasoning` 参数，避免上游报错
-- 为避免客户端 `max_tokens/max_output_tokens` 配错，代理在 Gemini 常用模型上会固定使用模型上限值请求上游
+- 为避免客户端 `max_tokens/max_output_tokens` 配错，代理在 Gemini 常用模型上会做上限裁剪；若仍触发 `INVALID_ARGUMENT`，会自动去掉该参数重试
 - `gpt-5.3-codex` 在当前上游兼容模式下不透传 `max_output_tokens`（避免上游 `Unsupported parameter` 报错）
+- Gemini 请求默认做 10 秒节流（`GEMINI_MIN_REQUEST_INTERVAL_SECONDS`），可按需调小/关闭（设为 `0`）
+- Gemini 主模型若触发 429/5xx，会自动 fallback 到 `GEMINI_FALLBACK_MODEL`
 
 ### 常用模型限额（代理内置）
 
