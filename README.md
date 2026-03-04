@@ -160,6 +160,17 @@ for model in ["gpt-5.3-codex", "gemini-3.1-pro-high", "claude-opus-4-6"]:
 
 ## 容器镜像更新与重启
 
+### 服务器侧一键更新（推荐）
+
+```bash
+cd /path/to/responses-to-completions-proxy
+git pull --rebase origin main
+docker compose pull completions-proxy
+docker compose up -d --no-build completions-proxy
+docker compose ps
+curl -sS http://127.0.0.1:18010/healthz
+```
+
 ### docker compose
 
 ```bash
