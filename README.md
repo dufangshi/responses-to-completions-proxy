@@ -32,6 +32,8 @@ UPSTREAM__OPENAI_API_KEY=sk-xxx
 UPSTREAM_ANTIGRAVITY_API_KEY=sk-xxx
 ```
 
+> 注意：仓库不会提交你的 `.env`（`.gitignore` 已忽略 `.env`），所以拉取最新代码不会自动改你服务器上的 `.env`。
+
 其余常用项：
 
 ```env
@@ -68,6 +70,25 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 > 说明：`UPSTREAM_BASE_URL` 只需填根域名，代理会自动拼接：
 > - OpenAI：`/v1`
 > - Antigravity：`/antigravity`
+
+### 旧 `.env` 键名迁移（从旧版本升级时）
+
+若你之前使用的是旧键名，可按下面方式迁移到新键名：
+
+```bash
+# 备份
+cp .env .env.bak.$(date +%Y%m%d-%H%M%S)
+
+# 旧键名 -> 新键名
+sed -i '' 's/^UPSTREAM_API_KEY=/UPSTREAM__OPENAI_API_KEY=/' .env
+sed -i '' 's/^UPSTREAM_GEMINI_API_KEY=/UPSTREAM_ANTIGRAVITY_API_KEY=/' .env
+sed -i '' 's/^GEMINI_MIN_REQUEST_INTERVAL_SECONDS=/ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS=/' .env
+sed -i '' 's/^GEMINI_FALLBACK_MODEL=/ANTIGRAVITY_FALLBACK_MODEL=/' .env
+```
+
+如果是 Linux（GNU sed），把 `sed -i ''` 改为 `sed -i`。
+
+兼容性说明：当前版本仍兼容旧键名读取，但建议尽快迁移为新键名。
 
 ---
 
@@ -166,6 +187,8 @@ for model in ["gpt-5.3-codex", "gemini-3.1-pro-high", "claude-opus-4-6"]:
 cd /path/to/responses-to-completions-proxy
 git pull --rebase origin main
 docker compose pull completions-proxy
+# 处理同名旧容器冲突（例如之前用 docker run 创建过）
+docker rm -f completions-proxy 2>/dev/null || true
 docker compose up -d --no-build completions-proxy
 docker compose ps
 curl -sS http://127.0.0.1:18010/healthz
