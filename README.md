@@ -43,6 +43,14 @@
 - `config`：重新输入配置，自动备份旧 `.env`，然后重建容器
 - `update`：在工作区干净时自动 `git pull --rebase --autostash`，然后重建容器
 
+`setup` / `config` 现在默认只问 4 个问题：
+- 上游 `Base URL`
+- 上游 `API Key`
+- 上游模式：`responses` 或 `messages`
+- 默认模型 `DEFAULT_UPSTREAM_MODEL`
+
+高级项不再交互询问，直接保留默认值或现有 `.env` 里的值。需要时手动编辑 `.env`。
+
 ---
 
 ## 一键启动
@@ -66,7 +74,7 @@ chmod +x ./proxy.sh
 
 提示：
 - 直接回车：保留当前值
-- 输入 `-`：清空当前值（适合 `FORCE_UPSTREAM_MODEL` / `MODEL_MAP` 这类可选项）
+- 输入 `-`：清空当前值（适合 `FORCE_UPSTREAM_MODEL` 这类可选项）
 
 拉最新代码并重建容器：
 
@@ -85,13 +93,13 @@ chmod +x ./proxy.sh
 
 ## 环境变量（高级）
 
-只需要这 3 个必填项：
+最小必填项：
 
 ```env
 UPSTREAM_BASE_URL=https://sub.lnz-study.com
 UPSTREAM_MODE=responses
-UPSTREAM_STREAMING_ENABLED=true
 UPSTREAM_API_KEY=sk-xxx
+DEFAULT_UPSTREAM_MODEL=gpt-5.4
 ```
 
 > 注意：仓库不会提交你的 `.env`（`.gitignore` 已忽略 `.env`），所以拉取最新代码不会自动改你服务器上的 `.env`。
@@ -114,10 +122,13 @@ UPSTREAM_FALLBACK_MODEL=
 # 强制模型链
 USE_FORCE_MODEL=false
 FORCE_UPSTREAM_MODEL=
-DEFAULT_UPSTREAM_MODEL=gpt-5.3-codex
+DEFAULT_UPSTREAM_MODEL=gpt-5.4
 
 # 对 gpt-5.3-codex / gpt-5.4 / claude-opus-4-6 / claude-sonnet-4-6 / claude-opus-4-5 生效
-DEFAULT_REASONING_EFFORT=high
+DEFAULT_REASONING_EFFORT=medium
+
+# 仅 messages 上游模式生效
+DEFAULT_UPSTREAM_SPEED=fast
 
 # 调试日志
 RAW_IO_LOG_ENABLED=false
@@ -132,6 +143,11 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 > - `UPSTREAM_MODE=messages` 时，请求会发到 `/v1/messages`
 > - `UPSTREAM_MODE=responses` 时，请求会发到 `/v1/responses`
 > - 默认 `UPSTREAM_STREAMING_ENABLED=true`，也就是即使客户端发普通非流式请求，proxy 也会优先用上游流式并在本地聚合结果
+> - 代理会忽略下游传来的 `model`、`reasoning`、`speed`
+> - 实际使用的模型、推理强度、fast 模式统一由 `.env` 控制
+> - 默认模型是 `gpt-5.4`
+> - 默认推理强度是 `medium`
+> - 默认 `DEFAULT_UPSTREAM_SPEED=fast`，且只在 `UPSTREAM_MODE=messages` 时生效
 
 ### 旧 `.env` 键名迁移（从旧版本升级时）
 
@@ -156,7 +172,7 @@ RAW_IO_LOG_KEEP_REQUESTS=10
   - 上游请求：`POST /v1/messages`
   - 适合 Claude Messages 风格上游
 
-模型名仍然由客户端正常传入，代理不会再按模型前缀把请求拆到不同上游。
+模型、reasoning effort、fast/speed 都由 proxy 内部配置统一控制，不再信任下游传参。
 
 ---
 
@@ -226,7 +242,7 @@ curl -sS http://127.0.0.1:18010/v1/completions \
 curl -sS http://127.0.0.1:18010/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"claude-opus-4-6:low",
+    "model":"anything-here-is-ignored",
     "max_tokens":128,
     "messages":[
       {
@@ -243,9 +259,8 @@ curl -sS http://127.0.0.1:18010/v1/messages \
 curl -N http://127.0.0.1:18010/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"claude-opus-4-6:medium",
+    "model":"anything-here-is-ignored",
     "messages":[{"role":"user","content":"Reply with hello only."}],
-    "speed":"fast",
     "stream":true
   }'
 ```
@@ -262,9 +277,9 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:18010/v1", api_key="test-local")
 
-for model in ["gpt-5.3-codex", "claude-opus-4-6"]:
+for model in ["gpt-5.4", "claude-opus-4-6"]:
     r = client.responses.create(model=model, input="hello")
-    print(model, r.output_text)
+    print("requested =", model, "actual =", r.model, "text =", r.output_text)
 ```
 
 ---
@@ -275,7 +290,7 @@ for model in ["gpt-5.3-codex", "claude-opus-4-6"]:
 - API 类型：`openai-completions`
 - Base URL：`http://127.0.0.1:18010/v1`
 - API Key：任意占位值（例如 `111`）
-- Model：`gpt-5.3-codex`
+- Model：随便填一个占位模型名也行，但建议和 `.env` 里的 `DEFAULT_UPSTREAM_MODEL` 保持一致
 
 然后手动检查 `openclaw.json` 里的模型参数（重要）：
 - `contextWindow` 设大（建议 `400000`）

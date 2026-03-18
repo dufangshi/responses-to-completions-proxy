@@ -36,9 +36,7 @@ async def create_completion(
     settings = request.app.state.settings
 
     try:
-        resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(
-            completion_request.model
-        )
+        resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
         payload = build_responses_payload(
             completion_request,
             resolved_model,
@@ -184,6 +182,6 @@ async def create_completion(
     response_body = build_legacy_completion_response(
         request=completion_request,
         upstream_results=upstream_results,
-        response_model_name=completion_request.model or resolved_model,
+        response_model_name=resolved_model,
     )
     return JSONResponse(status_code=status.HTTP_200_OK, content=response_body.model_dump())

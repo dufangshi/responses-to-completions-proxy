@@ -1524,10 +1524,14 @@ class RoutingResponsesGateway(BaseResponsesGateway):
 
     def _build_attempt_payloads(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         force_chain = self._settings.force_model_chain()
-        if not force_chain:
-            return [payload]
-
         base_payload = dict(payload)
+        base_payload["model"] = self._settings.default_upstream_model
+        base_payload.pop("speed", None)
+        if self._settings.upstream_mode == "messages" and self._settings.default_upstream_speed:
+            base_payload["speed"] = self._settings.default_upstream_speed
+        if not force_chain:
+            return [base_payload]
+
         attempts: list[dict[str, Any]] = []
         for model in force_chain:
             item = dict(base_payload)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 
@@ -15,31 +14,6 @@ REASONING_EFFORT_MODELS = {
     "claude-opus-4-5",
 }
 ALLOWED_UPSTREAM_MODES = {"responses", "messages"}
-
-
-def _parse_model_map(raw_value: str) -> dict[str, str]:
-    raw_value = raw_value.strip()
-    if not raw_value:
-        return {}
-
-    if raw_value.startswith("{"):
-        parsed = json.loads(raw_value)
-        if not isinstance(parsed, dict):
-            raise ValueError("MODEL_MAP JSON must be an object.")
-        return {str(k): str(v) for k, v in parsed.items()}
-
-    model_map: dict[str, str] = {}
-    for segment in raw_value.split(","):
-        part = segment.strip()
-        if not part:
-            continue
-        if ":" not in part:
-            raise ValueError(
-                "MODEL_MAP must be JSON or comma-separated legacy:target pairs."
-            )
-        legacy_model, target_model = part.split(":", 1)
-        model_map[legacy_model.strip()] = target_model.strip()
-    return model_map
 
 
 def _parse_reasoning_effort(raw_value: str) -> str | None:
@@ -62,25 +36,6 @@ def _parse_upstream_mode(raw_value: str) -> str:
             "UPSTREAM_MODE must be one of: responses, messages."
         )
     return value
-
-
-def _extract_model_reasoning_effort(model_name: str | None) -> tuple[str | None, str | None]:
-    if not isinstance(model_name, str):
-        return model_name, None
-
-    raw = model_name.strip()
-    if not raw:
-        return None, None
-
-    lowered = raw.lower()
-    for effort in ALLOWED_REASONING_EFFORTS:
-        suffix = f":{effort}"
-        if lowered.endswith(suffix):
-            base = raw[: -len(suffix)].strip()
-            if base:
-                return base, effort
-            return None, effort
-    return raw, None
 
 
 def _supports_reasoning_effort(model_name: str) -> bool:
@@ -204,7 +159,7 @@ class Settings:
     force_upstream_models: tuple[str, ...]
     default_upstream_model: str
     default_reasoning_effort: str | None
-    model_map: dict[str, str]
+    default_upstream_speed: str | None
     raw_io_log_enabled: bool
     raw_io_log_path: str
     raw_io_log_max_chars: int
@@ -213,8 +168,6 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
-        raw_model_map = os.getenv("MODEL_MAP", "")
-        model_map = _parse_model_map(raw_model_map)
         upstream_mode = _parse_upstream_mode(os.getenv("UPSTREAM_MODE", "responses"))
         upstream_root = _derive_upstream_root(
             os.getenv("UPSTREAM_BASE_URL", "https://api.openai.com")
@@ -259,11 +212,13 @@ class Settings:
             force_upstream_models=_parse_force_model_list(
                 os.getenv("FORCE_UPSTREAM_MODEL", "")
             ),
-            default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.3-codex"),
+            default_upstream_model=os.getenv("DEFAULT_UPSTREAM_MODEL", "gpt-5.4"),
             default_reasoning_effort=_parse_reasoning_effort(
-                os.getenv("DEFAULT_REASONING_EFFORT", "high")
+                os.getenv("DEFAULT_REASONING_EFFORT", "medium")
             ),
-            model_map=model_map,
+            default_upstream_speed=_parse_optional_str(
+                os.getenv("DEFAULT_UPSTREAM_SPEED", "fast")
+            ),
             raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
             raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),
             raw_io_log_max_chars=_parse_positive_int(
@@ -279,20 +234,11 @@ class Settings:
     def resolve_model(self, client_model: str | None) -> str:
         if self.use_force_model and self.force_upstream_models:
             return self.force_upstream_models[0]
-        if client_model and client_model in self.model_map:
-            return self.model_map[client_model]
-        if client_model:
-            return client_model
         return self.default_upstream_model
 
     def resolve_model_and_reasoning(self, client_model: str | None) -> tuple[str, str | None]:
-        model_name, inline_reasoning = _extract_model_reasoning_effort(client_model)
-        resolved_model = self.resolve_model(model_name)
-
-        reasoning_effort = inline_reasoning
-        if reasoning_effort is None:
-            reasoning_effort = self.default_reasoning_effort
-
+        resolved_model = self.resolve_model(client_model)
+        reasoning_effort = self.default_reasoning_effort
         if not _supports_reasoning_effort(resolved_model):
             reasoning_effort = None
 

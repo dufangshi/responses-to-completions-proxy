@@ -39,22 +39,14 @@ def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[
     settings = request.app.state.settings
     normalized = dict(payload)
 
-    requested_model = normalized.get("model")
-    if not isinstance(requested_model, str):
-        requested_model = None
-    resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(requested_model)
+    resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
     normalized["model"] = resolved_model
 
     if reasoning_effort:
-        raw_reasoning = normalized.get("reasoning")
-        if isinstance(raw_reasoning, dict):
-            merged_reasoning = dict(raw_reasoning)
-            merged_reasoning["effort"] = reasoning_effort
-            normalized["reasoning"] = merged_reasoning
-        else:
-            normalized["reasoning"] = {"effort": reasoning_effort}
+        normalized["reasoning"] = {"effort": reasoning_effort}
     else:
         normalized.pop("reasoning", None)
+    normalized.pop("speed", None)
 
     normalized = _normalize_responses_input(normalized)
 

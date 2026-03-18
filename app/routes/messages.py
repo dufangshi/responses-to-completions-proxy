@@ -14,8 +14,6 @@ from app.services.streaming_adapter import iter_upstream_sse_events
 
 router = APIRouter()
 
-_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
-
 
 @router.post("/v1/messages")
 @router.post("/messages")
@@ -91,14 +89,7 @@ def _build_responses_payload_from_messages_request(
 ) -> tuple[dict[str, Any], str]:
     settings = request.app.state.settings
 
-    raw_model = raw_payload.get("model")
-    if not isinstance(raw_model, str) or not raw_model.strip():
-        raise ValueError("model is required.")
-
-    resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(raw_model)
-    explicit_effort = _extract_explicit_reasoning_effort(raw_payload)
-    if explicit_effort:
-        reasoning_effort = explicit_effort
+    resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
 
     input_items, system_text = _convert_messages_input(raw_payload)
 
@@ -139,10 +130,6 @@ def _build_responses_payload_from_messages_request(
         if stops:
             payload["stop"] = stops
 
-    speed = raw_payload.get("speed")
-    if isinstance(speed, str) and speed.strip():
-        payload["speed"] = speed.strip()
-
     user_id = _extract_user_id(raw_payload.get("metadata"))
     if user_id:
         payload["user"] = user_id
@@ -155,7 +142,7 @@ def _build_responses_payload_from_messages_request(
     if converted_tool_choice is not None:
         payload["tool_choice"] = converted_tool_choice
 
-    return payload, raw_model.strip()
+    return payload, resolved_model
 
 
 def _convert_messages_input(raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
@@ -452,33 +439,6 @@ def _convert_tool_choice(raw_tool_choice: Any) -> str | dict[str, Any] | None:
             raise ValueError("tool_choice.name is required when tool_choice.type='tool'.")
         return {"type": "tool", "name": name.strip()}
     raise ValueError("tool_choice.type must be auto, any, tool, or none.")
-
-
-def _extract_explicit_reasoning_effort(raw_payload: dict[str, Any]) -> str | None:
-    candidates = [
-        _extract_effort_from_obj(raw_payload.get("reasoning")),
-        _extract_effort_from_obj(raw_payload.get("output_config")),
-    ]
-    for candidate in candidates:
-        if candidate is not None:
-            return candidate
-    return None
-
-
-def _extract_effort_from_obj(raw_value: Any) -> str | None:
-    if not isinstance(raw_value, dict):
-        return None
-    effort = raw_value.get("effort")
-    if not isinstance(effort, str):
-        return None
-    normalized = effort.strip().lower()
-    if not normalized:
-        return None
-    if normalized not in _SUPPORTED_REASONING_EFFORTS:
-        raise ValueError(
-            "reasoning effort must be one of: none, minimal, low, medium, high, xhigh."
-        )
-    return normalized
 
 
 def _extract_user_id(raw_metadata: Any) -> str | None:

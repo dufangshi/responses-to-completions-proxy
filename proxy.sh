@@ -16,8 +16,9 @@ DEFAULT_UPSTREAM_MESSAGES_API_VERSION="2023-06-01"
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS="120"
 DEFAULT_UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS="10"
 DEFAULT_UPSTREAM_FALLBACK_MODEL=""
-DEFAULT_DEFAULT_UPSTREAM_MODEL="gpt-5.3-codex"
-DEFAULT_DEFAULT_REASONING_EFFORT="high"
+DEFAULT_DEFAULT_UPSTREAM_MODEL="gpt-5.4"
+DEFAULT_DEFAULT_REASONING_EFFORT="medium"
+DEFAULT_DEFAULT_UPSTREAM_SPEED="fast"
 DEFAULT_RAW_IO_LOG_ENABLED="false"
 DEFAULT_RAW_IO_LOG_PATH="logs/raw_io.jsonl"
 DEFAULT_RAW_IO_LOG_MAX_CHARS="120000"
@@ -180,9 +181,7 @@ USE_FORCE_MODEL=$USE_FORCE_MODEL
 FORCE_UPSTREAM_MODEL=$FORCE_UPSTREAM_MODEL
 DEFAULT_UPSTREAM_MODEL=$DEFAULT_UPSTREAM_MODEL
 DEFAULT_REASONING_EFFORT=$DEFAULT_REASONING_EFFORT
-# JSON or legacy:target comma list, e.g.
-# MODEL_MAP={"gpt-3.5-turbo-instruct":"gpt-5.3-codex"}
-MODEL_MAP=$MODEL_MAP
+DEFAULT_UPSTREAM_SPEED=$DEFAULT_UPSTREAM_SPEED
 
 # Raw IO debug logging
 RAW_IO_LOG_ENABLED=$RAW_IO_LOG_ENABLED
@@ -202,26 +201,29 @@ EOF
 
 collect_config() {
   info "Interactive configuration"
+  info "Only essential fields are prompted."
+  info "Advanced settings can be edited directly in .env."
 
-  APP_HOST="$(prompt_text "Bind host" "$(current_or_default APP_HOST "$DEFAULT_APP_HOST")")"
-  APP_PORT="$(prompt_text "Bind port" "$(current_or_default APP_PORT "$DEFAULT_APP_PORT")")"
+  APP_HOST="$(current_or_default APP_HOST "$DEFAULT_APP_HOST")"
+  APP_PORT="$(current_or_default APP_PORT "$DEFAULT_APP_PORT")"
   UPSTREAM_BASE_URL="$(prompt_text "Upstream base URL" "$(current_or_default UPSTREAM_BASE_URL "$DEFAULT_UPSTREAM_BASE_URL")")"
   UPSTREAM_MODE="$(prompt_text "Upstream mode (responses/messages)" "$(current_or_default UPSTREAM_MODE "$DEFAULT_UPSTREAM_MODE")")"
-  UPSTREAM_STREAMING_ENABLED="$(prompt_text "Enable upstream streaming by default (true/false)" "$(current_or_default UPSTREAM_STREAMING_ENABLED "$DEFAULT_UPSTREAM_STREAMING_ENABLED")")"
   UPSTREAM_API_KEY="$(prompt_secret "Upstream API key" "$(current_or_default UPSTREAM_API_KEY "")")"
-  UPSTREAM_MESSAGES_API_VERSION="$(prompt_text "Messages API version" "$(current_or_default UPSTREAM_MESSAGES_API_VERSION "$DEFAULT_UPSTREAM_MESSAGES_API_VERSION")")"
-  UPSTREAM_TIMEOUT_SECONDS="$(prompt_text "Upstream timeout seconds" "$(current_or_default UPSTREAM_TIMEOUT_SECONDS "$DEFAULT_UPSTREAM_TIMEOUT_SECONDS")")"
-  UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS="$(prompt_text "Upstream min request interval seconds" "$(current_or_default UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS "$DEFAULT_UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS")")"
-  UPSTREAM_FALLBACK_MODEL="$(prompt_text "Upstream fallback model" "$(current_or_default UPSTREAM_FALLBACK_MODEL "$DEFAULT_UPSTREAM_FALLBACK_MODEL")")"
   DEFAULT_UPSTREAM_MODEL="$(prompt_text "Default upstream model" "$(current_or_default DEFAULT_UPSTREAM_MODEL "$DEFAULT_DEFAULT_UPSTREAM_MODEL")")"
-  DEFAULT_REASONING_EFFORT="$(prompt_text "Default reasoning effort" "$(current_or_default DEFAULT_REASONING_EFFORT "$DEFAULT_DEFAULT_REASONING_EFFORT")")"
-  USE_FORCE_MODEL="$(prompt_text "Use force model chain (true/false)" "$(current_or_default USE_FORCE_MODEL "false")")"
-  FORCE_UPSTREAM_MODEL="$(prompt_text "Force upstream model chain (comma list, optional)" "$(current_or_default FORCE_UPSTREAM_MODEL "")")"
-  MODEL_MAP="$(prompt_text "Model map JSON or legacy:target pairs (optional)" "$(current_or_default MODEL_MAP "")")"
-  RAW_IO_LOG_ENABLED="$(prompt_text "Enable raw IO log (true/false)" "$(current_or_default RAW_IO_LOG_ENABLED "$DEFAULT_RAW_IO_LOG_ENABLED")")"
-  RAW_IO_LOG_PATH="$(prompt_text "Raw IO log path" "$(current_or_default RAW_IO_LOG_PATH "$DEFAULT_RAW_IO_LOG_PATH")")"
-  RAW_IO_LOG_MAX_CHARS="$(prompt_text "Raw IO log max chars" "$(current_or_default RAW_IO_LOG_MAX_CHARS "$DEFAULT_RAW_IO_LOG_MAX_CHARS")")"
-  RAW_IO_LOG_KEEP_REQUESTS="$(prompt_text "Raw IO log keep requests" "$(current_or_default RAW_IO_LOG_KEEP_REQUESTS "$DEFAULT_RAW_IO_LOG_KEEP_REQUESTS")")"
+
+  UPSTREAM_STREAMING_ENABLED="$(current_or_default UPSTREAM_STREAMING_ENABLED "$DEFAULT_UPSTREAM_STREAMING_ENABLED")"
+  UPSTREAM_MESSAGES_API_VERSION="$(current_or_default UPSTREAM_MESSAGES_API_VERSION "$DEFAULT_UPSTREAM_MESSAGES_API_VERSION")"
+  UPSTREAM_TIMEOUT_SECONDS="$(current_or_default UPSTREAM_TIMEOUT_SECONDS "$DEFAULT_UPSTREAM_TIMEOUT_SECONDS")"
+  UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS="$(current_or_default UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS "$DEFAULT_UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS")"
+  UPSTREAM_FALLBACK_MODEL="$(current_or_default UPSTREAM_FALLBACK_MODEL "$DEFAULT_UPSTREAM_FALLBACK_MODEL")"
+  DEFAULT_REASONING_EFFORT="$(current_or_default DEFAULT_REASONING_EFFORT "$DEFAULT_DEFAULT_REASONING_EFFORT")"
+  DEFAULT_UPSTREAM_SPEED="$(current_or_default DEFAULT_UPSTREAM_SPEED "$DEFAULT_DEFAULT_UPSTREAM_SPEED")"
+  USE_FORCE_MODEL="$(current_or_default USE_FORCE_MODEL "false")"
+  FORCE_UPSTREAM_MODEL="$(current_or_default FORCE_UPSTREAM_MODEL "")"
+  RAW_IO_LOG_ENABLED="$(current_or_default RAW_IO_LOG_ENABLED "$DEFAULT_RAW_IO_LOG_ENABLED")"
+  RAW_IO_LOG_PATH="$(current_or_default RAW_IO_LOG_PATH "$DEFAULT_RAW_IO_LOG_PATH")"
+  RAW_IO_LOG_MAX_CHARS="$(current_or_default RAW_IO_LOG_MAX_CHARS "$DEFAULT_RAW_IO_LOG_MAX_CHARS")"
+  RAW_IO_LOG_KEEP_REQUESTS="$(current_or_default RAW_IO_LOG_KEEP_REQUESTS "$DEFAULT_RAW_IO_LOG_KEEP_REQUESTS")"
 
   validate_required "APP_HOST" "$APP_HOST"
   validate_required "APP_PORT" "$APP_PORT"
@@ -312,8 +314,8 @@ run_update() {
 show_help() {
   cat <<'EOF'
 Usage:
-  ./proxy.sh setup    # interactive first-time setup, then start the container
-  ./proxy.sh config   # rewrite .env interactively, then recreate the container
+  ./proxy.sh setup    # ask only base URL / API key / upstream mode / default model, then start
+  ./proxy.sh config   # same minimal reconfigure flow, then recreate the container
   ./proxy.sh up       # recreate/start the container using the current .env
   ./proxy.sh down     # stop the container
   ./proxy.sh logs     # tail container logs
