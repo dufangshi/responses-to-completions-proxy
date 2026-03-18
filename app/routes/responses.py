@@ -47,6 +47,7 @@ def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[
     else:
         normalized.pop("reasoning", None)
     normalized.pop("speed", None)
+    normalized.pop("service_tier", None)
     normalized.pop("user", None)
 
     normalized = _normalize_responses_input(normalized)

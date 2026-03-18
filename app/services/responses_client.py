@@ -1529,8 +1529,13 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         base_payload = dict(payload)
         base_payload["model"] = self._settings.default_upstream_model
         base_payload.pop("speed", None)
-        if self._settings.upstream_mode == "messages" and self._settings.default_upstream_speed:
-            base_payload["speed"] = self._settings.default_upstream_speed
+        base_payload.pop("service_tier", None)
+        if self._settings.default_upstream_speed:
+            normalized_speed = self._settings.default_upstream_speed.strip().lower()
+            if self._settings.upstream_mode == "messages":
+                base_payload["speed"] = normalized_speed
+            elif normalized_speed == "fast":
+                base_payload["service_tier"] = "priority"
         if not force_chain:
             return [base_payload]
 
