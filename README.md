@@ -127,7 +127,9 @@ DEFAULT_UPSTREAM_MODEL=gpt-5.4
 # 对 gpt-5.3-codex / gpt-5.4 / claude-opus-4-6 / claude-sonnet-4-6 / claude-opus-4-5 生效
 DEFAULT_REASONING_EFFORT=medium
 
-# 仅 messages 上游模式生效
+# 单一 fast 开关:
+# messages 上游 -> speed=fast
+# responses 上游 -> service_tier=priority
 DEFAULT_UPSTREAM_SPEED=fast
 
 # 调试日志
@@ -147,7 +149,11 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 > - 实际使用的模型、推理强度、fast 模式统一由 `.env` 控制
 > - 默认模型是 `gpt-5.4`
 > - 默认推理强度是 `medium`
-> - 默认 `DEFAULT_UPSTREAM_SPEED=fast`，且只在 `UPSTREAM_MODE=messages` 时生效
+> - `DEFAULT_UPSTREAM_SPEED` 是统一的 fast 开关
+> - 设为 `fast` 时：
+>   - `UPSTREAM_MODE=messages` -> 上游发送 `speed=fast`
+>   - `UPSTREAM_MODE=responses` -> 上游发送 `service_tier=priority`
+> - 留空或设为其他值时，不启用 fast 行为
 
 ### 旧 `.env` 键名迁移（从旧版本升级时）
 

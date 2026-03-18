@@ -1532,7 +1532,7 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         base_payload.pop("service_tier", None)
         if self._settings.default_upstream_speed:
             normalized_speed = self._settings.default_upstream_speed.strip().lower()
-            if self._settings.upstream_mode == "messages":
+            if self._settings.upstream_mode == "messages" and normalized_speed == "fast":
                 base_payload["speed"] = normalized_speed
             elif normalized_speed == "fast":
                 base_payload["service_tier"] = "priority"
