@@ -70,7 +70,9 @@ class OpenAIResponsesGateway(BaseResponsesGateway):
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._settings.upstream_streaming_enabled:
-            stream_iter = await self.stream_response(payload)
+            stream_payload = dict(payload)
+            stream_payload["stream"] = True
+            stream_iter = await self.stream_response(stream_payload)
             return await _collect_completed_response_from_sse(stream_iter)
         self._raw_logger.log(
             "upstream.request",
