@@ -54,6 +54,32 @@ class BaseResponsesGateway(ABC):
     async def close(self) -> None:
         raise NotImplementedError
 
+    async def create_native_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raise UpstreamAPIError(
+            400,
+            {
+                "error": {
+                    "message": "Native messages passthrough is not supported for this upstream mode.",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "native_messages_unsupported",
+                }
+            },
+        )
+
+    async def stream_native_message(self, payload: dict[str, Any]) -> AsyncIterator[str]:
+        raise UpstreamAPIError(
+            400,
+            {
+                "error": {
+                    "message": "Native messages passthrough is not supported for this upstream mode.",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "native_messages_unsupported",
+                }
+            },
+        )
+
 
 class OpenAIResponsesGateway(BaseResponsesGateway):
     def __init__(self, settings: Settings, raw_logger: RawIOLogger | None = None):
@@ -735,6 +761,34 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 response_model=requested_model,
             )
 
+    async def create_native_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        requested_model = _extract_native_message_model(payload, self._settings.default_upstream_model)
+        try:
+            return await self._create_native_message_for_model(
+                payload=payload,
+                target_model=requested_model,
+            )
+        except UpstreamAPIError as primary_exc:
+            fallback_model = self._resolve_fallback_model(requested_model, primary_exc)
+            if not fallback_model:
+                raise
+            self._raw_logger.log(
+                "upstream.fallback",
+                {
+                    "provider": "antigravity",
+                    "from_model": requested_model,
+                    "to_model": fallback_model,
+                    "status_code": primary_exc.status_code,
+                    "error": primary_exc.payload,
+                    "stream": False,
+                    "native_messages": True,
+                },
+            )
+            return await self._create_native_message_for_model(
+                payload=payload,
+                target_model=fallback_model,
+            )
+
     async def _create_response_for_model(
         self,
         *,
@@ -753,6 +807,28 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             response_model=response_model,
         )
         return antigravity_message_to_openai_response(raw_response, model=response_model)
+
+    async def _create_native_message_for_model(
+        self,
+        *,
+        payload: dict[str, Any],
+        target_model: str,
+    ) -> dict[str, Any]:
+        path = _extract_native_message_path(payload)
+        forward_headers = _extract_native_forward_headers(payload)
+        request_payload = _prepare_native_message_payload(
+            payload=payload,
+            target_model=target_model,
+            settings=self._settings,
+        )
+        return await self._perform_non_stream_antigravity_request(
+            antigravity_payload=request_payload,
+            path=path,
+            target_model=target_model,
+            response_model=target_model,
+            native_messages=True,
+            forwarded_headers=forward_headers,
+        )
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         if not self._settings.upstream_api_key:
@@ -794,6 +870,34 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 payload=payload,
                 target_model=fallback_model,
                 response_model=requested_model,
+            )
+
+    async def stream_native_message(self, payload: dict[str, Any]) -> AsyncIterator[str]:
+        requested_model = _extract_native_message_model(payload, self._settings.default_upstream_model)
+        try:
+            return await self._stream_native_message_for_model(
+                payload=payload,
+                target_model=requested_model,
+            )
+        except UpstreamAPIError as primary_exc:
+            fallback_model = self._resolve_fallback_model(requested_model, primary_exc)
+            if not fallback_model:
+                raise
+            self._raw_logger.log(
+                "upstream.fallback",
+                {
+                    "provider": "antigravity",
+                    "from_model": requested_model,
+                    "to_model": fallback_model,
+                    "status_code": primary_exc.status_code,
+                    "error": primary_exc.payload,
+                    "stream": True,
+                    "native_messages": True,
+                },
+            )
+            return await self._stream_native_message_for_model(
+                payload=payload,
+                target_model=fallback_model,
             )
 
     async def _stream_response_for_model(
@@ -1185,6 +1289,47 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
 
         return iterator()
 
+    async def _stream_native_message_for_model(
+        self,
+        *,
+        payload: dict[str, Any],
+        target_model: str,
+    ) -> AsyncIterator[str]:
+        path = _extract_native_message_path(payload)
+        forward_headers = _extract_native_forward_headers(payload)
+        request_payload = _prepare_native_message_payload(
+            payload=payload,
+            target_model=target_model,
+            settings=self._settings,
+        )
+        request_payload["stream"] = True
+        response = await self._perform_stream_antigravity_request(
+            antigravity_payload=request_payload,
+            path=path,
+            target_model=target_model,
+            response_model=target_model,
+            native_messages=True,
+            forwarded_headers=forward_headers,
+        )
+
+        async def iterator() -> AsyncIterator[str]:
+            try:
+                async for line in response.aiter_lines():
+                    self._raw_logger.log(
+                        "upstream.response.stream_line",
+                        {
+                            "provider": "antigravity",
+                            "path": path,
+                            "native_messages": True,
+                            "line": line,
+                        },
+                    )
+                    yield line
+            finally:
+                await response.aclose()
+
+        return iterator()
+
     def _resolve_fallback_model(self, requested_model: str, error: UpstreamAPIError) -> str | None:
         fallback_model = self._settings.upstream_fallback_model
         if not fallback_model:
@@ -1292,7 +1437,25 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                     }
                 },
             ) from exc
+        return await self._perform_non_stream_antigravity_request(
+            antigravity_payload=antigravity_payload,
+            path=path,
+            target_model=target_model,
+            response_model=response_model,
+            native_messages=False,
+            forwarded_headers=None,
+        )
 
+    async def _perform_non_stream_antigravity_request(
+        self,
+        *,
+        antigravity_payload: dict[str, Any],
+        path: str,
+        target_model: str,
+        response_model: str,
+        native_messages: bool,
+        forwarded_headers: dict[str, str] | None,
+    ) -> dict[str, Any]:
         self._raw_logger.log(
             "upstream.request",
             {
@@ -1301,11 +1464,15 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 "stream": False,
                 "target_model": target_model,
                 "response_model": response_model,
+                "native_messages": native_messages,
                 "payload": antigravity_payload,
             },
         )
         await self._wait_for_rate_slot()
-        extra_headers = self._extra_headers_for_payload(antigravity_payload)
+        extra_headers = self._extra_headers_for_payload(
+            payload=antigravity_payload,
+            forwarded_headers=forwarded_headers,
+        )
         response = await self._post_with_retry(
             path=path,
             payload=antigravity_payload,
@@ -1317,6 +1484,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 "provider": "antigravity",
                 "path": path,
                 "stream": False,
+                "native_messages": native_messages,
                 "status_code": response.status_code,
                 "body": response.text,
             },
@@ -1325,7 +1493,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             raw_error = _safe_json(response)
             raise UpstreamAPIError(
                 response.status_code,
-                antigravity_error_to_openai_error(response.status_code, raw_error),
+                raw_error if native_messages else antigravity_error_to_openai_error(response.status_code, raw_error),
             )
 
         try:
@@ -1379,7 +1547,25 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                     }
                 },
             ) from exc
+        return await self._perform_stream_antigravity_request(
+            antigravity_payload=antigravity_payload,
+            path=path,
+            target_model=target_model,
+            response_model=response_model,
+            native_messages=False,
+            forwarded_headers=None,
+        )
 
+    async def _perform_stream_antigravity_request(
+        self,
+        *,
+        antigravity_payload: dict[str, Any],
+        path: str,
+        target_model: str,
+        response_model: str,
+        native_messages: bool,
+        forwarded_headers: dict[str, str] | None,
+    ) -> httpx.Response:
         self._raw_logger.log(
             "upstream.request",
             {
@@ -1388,6 +1574,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 "stream": True,
                 "target_model": target_model,
                 "response_model": response_model,
+                "native_messages": native_messages,
                 "payload": antigravity_payload,
             },
         )
@@ -1397,7 +1584,10 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             json=antigravity_payload,
             headers={
                 "Accept": "text/event-stream",
-                **self._extra_headers_for_payload(antigravity_payload),
+                **self._extra_headers_for_payload(
+                    payload=antigravity_payload,
+                    forwarded_headers=forwarded_headers,
+                ),
             },
         )
         await self._wait_for_rate_slot()
@@ -1408,6 +1598,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 "provider": "antigravity",
                 "path": path,
                 "stream": True,
+                "native_messages": native_messages,
                 "status_code": response.status_code,
             },
         )
@@ -1421,6 +1612,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 "provider": "antigravity",
                 "path": path,
                 "stream": True,
+                "native_messages": native_messages,
                 "status_code": response.status_code,
                 "body": body.decode("utf-8", errors="replace"),
             },
@@ -1429,14 +1621,24 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         raw_error = _safe_json(body)
         raise UpstreamAPIError(
             response.status_code,
-            antigravity_error_to_openai_error(response.status_code, raw_error),
+            raw_error if native_messages else antigravity_error_to_openai_error(response.status_code, raw_error),
         )
 
-    def _extra_headers_for_payload(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _extra_headers_for_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        forwarded_headers: dict[str, str] | None,
+    ) -> dict[str, str]:
+        headers = dict(forwarded_headers or {})
         speed = payload.get("speed")
         if isinstance(speed, str) and speed.strip().lower() == "fast":
-            return {"anthropic-beta": "fast-mode-2026-02-01"}
-        return {}
+            existing_beta = headers.get("anthropic-beta", "").strip()
+            beta_values = [item.strip() for item in existing_beta.split(",") if item.strip()]
+            if "fast-mode-2026-02-01" not in beta_values:
+                beta_values.append("fast-mode-2026-02-01")
+            headers["anthropic-beta"] = ",".join(beta_values)
+        return headers
 
 
 class RoutingResponsesGateway(BaseResponsesGateway):
@@ -1521,6 +1723,78 @@ class RoutingResponsesGateway(BaseResponsesGateway):
             },
         )
 
+    async def create_native_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        attempts = self._build_native_message_attempt_payloads(payload)
+        last_error: UpstreamAPIError | None = None
+        for index, attempt_payload in enumerate(attempts):
+            try:
+                return await self._upstream_gateway.create_native_message(attempt_payload)
+            except UpstreamAPIError as exc:
+                last_error = exc
+                has_next = index < len(attempts) - 1
+                if not has_next or not _is_retryable_upstream_error(exc):
+                    raise
+                self._raw_logger.log(
+                    "proxy.route.fallback",
+                    {
+                        "from_model": attempt_payload.get("model"),
+                        "to_model": attempts[index + 1].get("model"),
+                        "status_code": exc.status_code,
+                        "error": exc.payload,
+                        "stream": False,
+                        "native_messages": True,
+                    },
+                )
+        if last_error is not None:
+            raise last_error
+        raise UpstreamAPIError(
+            500,
+            {
+                "error": {
+                    "message": "No available upstream model candidates.",
+                    "type": "server_error",
+                    "param": None,
+                    "code": "no_model_candidates",
+                }
+            },
+        )
+
+    async def stream_native_message(self, payload: dict[str, Any]) -> AsyncIterator[str]:
+        attempts = self._build_native_message_attempt_payloads(payload)
+        last_error: UpstreamAPIError | None = None
+        for index, attempt_payload in enumerate(attempts):
+            try:
+                return await self._upstream_gateway.stream_native_message(attempt_payload)
+            except UpstreamAPIError as exc:
+                last_error = exc
+                has_next = index < len(attempts) - 1
+                if not has_next or not _is_retryable_upstream_error(exc):
+                    raise
+                self._raw_logger.log(
+                    "proxy.route.fallback",
+                    {
+                        "from_model": attempt_payload.get("model"),
+                        "to_model": attempts[index + 1].get("model"),
+                        "status_code": exc.status_code,
+                        "error": exc.payload,
+                        "stream": True,
+                        "native_messages": True,
+                    },
+                )
+        if last_error is not None:
+            raise last_error
+        raise UpstreamAPIError(
+            500,
+            {
+                "error": {
+                    "message": "No available upstream model candidates.",
+                    "type": "server_error",
+                    "param": None,
+                    "code": "no_model_candidates",
+                }
+            },
+        )
+
     async def close(self) -> None:
         await self._upstream_gateway.close()
 
@@ -1554,6 +1828,29 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         )
         return attempts
 
+    def _build_native_message_attempt_payloads(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        force_chain = self._settings.force_model_chain()
+        models = force_chain or (self._settings.default_upstream_model,)
+        attempts = [
+            _prepare_native_message_payload(
+                payload=payload,
+                target_model=model,
+                settings=self._settings,
+            )
+            for model in models
+        ]
+        if force_chain:
+            self._raw_logger.log(
+                "proxy.route.force_chain",
+                {
+                    "enabled": True,
+                    "models": list(force_chain),
+                    "count": len(attempts),
+                    "native_messages": True,
+                },
+            )
+        return attempts
+
 
 def _extract_model(payload: dict[str, Any]) -> str:
     model = payload.get("model")
@@ -1570,6 +1867,120 @@ def _extract_model(payload: dict[str, Any]) -> str:
             }
         },
     )
+
+
+def _extract_native_message_model(payload: dict[str, Any], fallback_model: str) -> str:
+    model = payload.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return fallback_model
+
+
+def _prepare_native_message_payload(
+    *,
+    payload: dict[str, Any],
+    target_model: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    base_payload = dict(payload)
+    base_payload.pop("__proxy_query_string", None)
+    base_payload.pop("__proxy_forward_headers", None)
+    base_payload["model"] = target_model
+    base_payload.pop("user", None)
+    base_payload.pop("service_tier", None)
+    base_payload.pop("speed", None)
+
+    default_speed = settings.default_upstream_speed
+    if isinstance(default_speed, str) and default_speed.strip().lower() == "fast":
+        base_payload["speed"] = "fast"
+
+    reasoning_effort = settings.reasoning_effort_for_model(target_model)
+    if reasoning_effort:
+        _apply_native_message_reasoning(
+            payload=base_payload,
+            model=target_model,
+            reasoning_effort=reasoning_effort,
+        )
+    else:
+        base_payload.pop("reasoning", None)
+        base_payload.pop("output_config", None)
+
+    if _should_strip_thinking_for_model(target_model):
+        base_payload.pop("thinking", None)
+
+    base_payload["max_tokens"] = _resolve_native_message_max_tokens(base_payload, target_model)
+    return base_payload
+
+
+def _apply_native_message_reasoning(
+    *,
+    payload: dict[str, Any],
+    model: str,
+    reasoning_effort: str,
+) -> None:
+    if _is_claude_reasoning_model(model):
+        output_config = payload.get("output_config")
+        merged_output_config = dict(output_config) if isinstance(output_config, dict) else {}
+        merged_output_config["effort"] = reasoning_effort
+        payload["output_config"] = merged_output_config
+        payload.pop("reasoning", None)
+        return
+
+    reasoning = payload.get("reasoning")
+    merged_reasoning = dict(reasoning) if isinstance(reasoning, dict) else {}
+    merged_reasoning["effort"] = reasoning_effort
+    payload["reasoning"] = merged_reasoning
+    payload.pop("output_config", None)
+
+
+def _is_claude_reasoning_model(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized in {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+    }
+
+
+def _should_strip_thinking_for_model(model: str) -> bool:
+    return not _is_claude_reasoning_model(model)
+
+
+def _resolve_native_message_max_tokens(payload: dict[str, Any], model: str) -> int:
+    parsed_value = _safe_int(payload.get("max_tokens"))
+    if parsed_value <= 0:
+        parsed_value = 4096
+
+    model_limit = resolve_model_max_output_tokens(model)
+    if model_limit is not None:
+        return min(parsed_value, model_limit)
+    return parsed_value
+
+
+def _extract_native_message_path(payload: dict[str, Any]) -> str:
+    query_string = payload.get("__proxy_query_string")
+    if not isinstance(query_string, str):
+        return "/messages"
+    stripped = query_string.strip()
+    if not stripped:
+        return "/messages"
+    return f"/messages?{stripped}"
+
+
+def _extract_native_forward_headers(payload: dict[str, Any]) -> dict[str, str]:
+    raw_headers = payload.get("__proxy_forward_headers")
+    if not isinstance(raw_headers, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for key, value in raw_headers.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        stripped_key = key.strip()
+        stripped_value = value.strip()
+        if not stripped_key or not stripped_value:
+            continue
+        headers[stripped_key] = stripped_value
+    return headers
 
 
 def _is_retryable_upstream_error(error: UpstreamAPIError) -> bool:

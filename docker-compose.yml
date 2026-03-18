@@ -15,3 +15,4 @@ services:
       - "18010:18010"
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data

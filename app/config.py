@@ -238,11 +238,12 @@ class Settings:
 
     def resolve_model_and_reasoning(self, client_model: str | None) -> tuple[str, str | None]:
         resolved_model = self.resolve_model(client_model)
-        reasoning_effort = self.default_reasoning_effort
-        if not _supports_reasoning_effort(resolved_model):
-            reasoning_effort = None
+        return resolved_model, self.reasoning_effort_for_model(resolved_model)
 
-        return resolved_model, reasoning_effort
+    def reasoning_effort_for_model(self, model_name: str) -> str | None:
+        if not _supports_reasoning_effort(model_name):
+            return None
+        return self.default_reasoning_effort
 
     def force_model_chain(self) -> tuple[str, ...]:
         if not self.use_force_model:

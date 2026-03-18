@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.services.file_store import resolve_openai_payload_file_ids
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 
 router = APIRouter()
@@ -37,6 +38,7 @@ def _normalize_responses_input(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
+    file_store = request.app.state.file_store
     normalized = dict(payload)
 
     resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
@@ -59,7 +61,7 @@ def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[
     if "codex" in resolved_model.lower():
         normalized.pop("max_output_tokens", None)
 
-    return normalized
+    return resolve_openai_payload_file_ids(normalized, file_store)
 
 
 def _sse_passthrough(lines: AsyncIterator[str]) -> AsyncIterator[bytes]:

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.models.legacy_completions import CompletionUsage
 from app.models.legacy_chat_completions import LegacyChatCompletionRequest
+from app.services.file_store import resolve_openai_payload_file_ids
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 from app.services.streaming_adapter import (
     chat_stream_chunk,
@@ -153,6 +154,7 @@ async def create_chat_completion(
 ) -> Response:
     gateway: BaseResponsesGateway = request.app.state.responses_gateway
     settings = request.app.state.settings
+    file_store = request.app.state.file_store
 
     try:
         resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
@@ -161,6 +163,7 @@ async def create_chat_completion(
             resolved_model,
             reasoning_effort,
         )
+        payload = resolve_openai_payload_file_ids(payload, file_store)
     except UnsupportedParameterError as exc:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

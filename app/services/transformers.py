@@ -310,8 +310,54 @@ def convert_chat_content_part(part: Any, role: str) -> dict[str, Any]:
             built["detail"] = part["detail"]
         return built
 
+    if part_type == "file":
+        if _text_type_for_role(role) != "input_text":
+            raise UnsupportedParameterError("file content is only supported for user/system/developer messages.")
+        file_obj = part.get("file")
+        if not isinstance(file_obj, dict):
+            raise UnsupportedParameterError("messages[].content[].file must be an object.")
+        return _build_input_file_part(file_obj)
+
+    if part_type == "input_file":
+        if _text_type_for_role(role) != "input_text":
+            raise UnsupportedParameterError("file content is only supported for user/system/developer messages.")
+        return _build_input_file_part(part)
+
     raise UnsupportedParameterError(
         f"messages[].content[] type '{part_type}' is not supported by this compatibility proxy."
+    )
+
+
+def _build_input_file_part(raw_file: dict[str, Any]) -> dict[str, Any]:
+    filename = raw_file.get("filename")
+    resolved_filename = filename.strip() if isinstance(filename, str) and filename.strip() else "document.pdf"
+
+    file_id = raw_file.get("file_id")
+    if isinstance(file_id, str) and file_id.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_id": file_id.strip(),
+        }
+
+    file_url = raw_file.get("file_url")
+    if isinstance(file_url, str) and file_url.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_url": file_url.strip(),
+        }
+
+    file_data = raw_file.get("file_data")
+    if isinstance(file_data, str) and file_data.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_data": file_data.strip(),
+        }
+
+    raise UnsupportedParameterError(
+        "messages[].content[].file requires file_id, file_url, or file_data."
     )
 
 

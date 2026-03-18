@@ -293,7 +293,63 @@ def _content_to_blocks(content: Any) -> list[dict[str, Any]]:
                     "content": _stringify_tool_result(part.get("content")),
                 }
             )
+            continue
+        if part_type == "input_file":
+            document_block = _convert_input_file_to_document_block(part)
+            if document_block is not None:
+                blocks.append(document_block)
     return blocks
+
+
+def _convert_input_file_to_document_block(part: dict[str, Any]) -> dict[str, Any] | None:
+    file_id = _string(part.get("file_id")).strip()
+    if file_id:
+        return {
+            "type": "document",
+            "source": {
+                "type": "file",
+                "file_id": file_id,
+            },
+        }
+
+    file_url = _string(part.get("file_url")).strip()
+    if file_url:
+        return {
+            "type": "document",
+            "source": {
+                "type": "url",
+                "url": file_url,
+            },
+        }
+
+    file_data = _string(part.get("file_data")).strip()
+    media_type, base64_data = _split_data_url(file_data)
+    if media_type and base64_data and media_type.lower() == "application/pdf":
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64_data,
+            },
+        }
+    return None
+
+
+def _split_data_url(value: str) -> tuple[str | None, str | None]:
+    if not value.startswith("data:"):
+        return None, None
+    header, separator, data = value.partition(",")
+    if not separator or not data:
+        return None, None
+    media_section = header[5:]
+    media_type, _, encoding = media_section.partition(";")
+    if encoding.lower() != "base64":
+        return None, None
+    media_type = media_type.strip()
+    if not media_type:
+        return None, None
+    return media_type, data.strip()
 
 
 def _extract_text(content: Any) -> str:

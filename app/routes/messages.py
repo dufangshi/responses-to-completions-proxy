@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -9,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.services.file_store import resolve_native_message_file_ids, resolve_openai_payload_file_ids
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 from app.services.streaming_adapter import iter_upstream_sse_events
 
@@ -21,6 +24,7 @@ router = APIRouter()
 @router.post("/message")
 async def create_message(request: Request) -> Response:
     gateway: BaseResponsesGateway = request.app.state.responses_gateway
+    settings = request.app.state.settings
 
     try:
         raw_payload = await request.json()
@@ -34,6 +38,40 @@ async def create_message(request: Request) -> Response:
         return _error_response(
             status.HTTP_400_BAD_REQUEST,
             "Request body must be a JSON object.",
+        )
+
+    if settings.upstream_mode == "messages":
+        raw_payload = _prepare_native_message_request(raw_payload, request)
+        if raw_payload.get("stream") is True:
+            try:
+                upstream_lines = await gateway.stream_native_message(raw_payload)
+            except UpstreamAPIError as exc:
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=_anthropic_error_payload(exc.status_code, exc.payload),
+                )
+
+            return StreamingResponse(
+                _raw_sse_passthrough(upstream_lines),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        try:
+            upstream_response = await gateway.create_native_message(raw_payload)
+        except UpstreamAPIError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=_anthropic_error_payload(exc.status_code, exc.payload),
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=upstream_response,
         )
 
     try:
@@ -88,6 +126,7 @@ def _build_responses_payload_from_messages_request(
     request: Request,
 ) -> tuple[dict[str, Any], str]:
     settings = request.app.state.settings
+    file_store = request.app.state.file_store
 
     resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
 
@@ -98,6 +137,10 @@ def _build_responses_payload_from_messages_request(
         "input": input_items,
         "store": False,
     }
+
+    prompt_cache_key = _extract_prompt_cache_key(raw_payload)
+    if prompt_cache_key:
+        payload["prompt_cache_key"] = prompt_cache_key
 
     if system_text:
         payload["instructions"] = system_text
@@ -138,7 +181,7 @@ def _build_responses_payload_from_messages_request(
     if converted_tool_choice is not None:
         payload["tool_choice"] = converted_tool_choice
 
-    return payload, resolved_model
+    return resolve_openai_payload_file_ids(payload, file_store), resolved_model
 
 
 def _convert_messages_input(raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
@@ -201,6 +244,34 @@ def _convert_message_to_input_items(message: dict[str, Any], *, index: int) -> l
                 )
             image_url = _extract_image_url(block, message_index=index, block_index=block_index)
             buffered_content.append({"type": "input_image", "image_url": image_url})
+            continue
+
+        if block_type == "document":
+            if role_value != "user":
+                raise ValueError(
+                    f"messages[{index}].content[{block_index}] document blocks are only supported for user messages."
+                )
+            buffered_content.append(
+                _extract_input_file_from_document_block(
+                    block,
+                    message_index=index,
+                    block_index=block_index,
+                )
+            )
+            continue
+
+        if block_type == "input_file":
+            if role_value != "user":
+                raise ValueError(
+                    f"messages[{index}].content[{block_index}] input_file blocks are only supported for user messages."
+                )
+            buffered_content.append(
+                _extract_input_file_block(
+                    block,
+                    message_index=index,
+                    block_index=block_index,
+                )
+            )
             continue
 
         if block_type == "tool_use":
@@ -312,11 +383,63 @@ def _convert_system_text(raw_system: Any) -> str | None:
         text = block.get("text")
         if not isinstance(text, str):
             raise ValueError(f"system[{index}].text must be a string.")
+        if _should_skip_system_text_for_cache(text):
+            continue
         if text.strip():
             parts.append(text.strip())
 
     joined = "\n\n".join(parts).strip()
     return joined or None
+
+
+def _should_skip_system_text_for_cache(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return stripped.lower().startswith("x-anthropic-billing-header:")
+
+
+def _extract_prompt_cache_key(raw_payload: dict[str, Any]) -> str | None:
+    metadata = raw_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    for field_name in ("user_id", "session_id"):
+        raw_value = metadata.get(field_name)
+        if not isinstance(raw_value, str):
+            continue
+        normalized = _normalize_prompt_cache_identity(raw_value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_prompt_cache_identity(raw_value: str) -> str | None:
+    stripped = raw_value.strip()
+    if not stripped:
+        return None
+
+    identity = _extract_session_id(stripped) or stripped
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return f"claude-code:{digest}"
+
+
+def _extract_session_id(raw_value: str) -> str | None:
+    try:
+        parsed = json.loads(raw_value)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        session_id = parsed.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+
+    match = re.search(r'"session_id"\s*:\s*"([^"]+)"', raw_value)
+    if not match:
+        return None
+    candidate = match.group(1).strip()
+    return candidate or None
 
 
 def _extract_image_url(block: dict[str, Any], *, message_index: int, block_index: int) -> str:
@@ -351,6 +474,120 @@ def _extract_image_url(block: dict[str, Any], *, message_index: int, block_index
     raise ValueError(
         f"messages[{message_index}].content[{block_index}].source.type '{source_type}' is not supported."
     )
+
+
+def _extract_input_file_from_document_block(
+    block: dict[str, Any],
+    *,
+    message_index: int,
+    block_index: int,
+) -> dict[str, Any]:
+    source = block.get("source")
+    if not isinstance(source, dict):
+        raise ValueError(
+            f"messages[{message_index}].content[{block_index}].source must be an object."
+        )
+
+    source_type = source.get("type")
+    filename = _document_filename(block)
+    if source_type == "base64":
+        media_type = source.get("media_type")
+        data = source.get("data")
+        if not isinstance(media_type, str) or not media_type.strip():
+            raise ValueError(
+                f"messages[{message_index}].content[{block_index}].source.media_type must be a string."
+            )
+        if media_type.strip().lower() != "application/pdf":
+            raise ValueError(
+                f"messages[{message_index}].content[{block_index}] only application/pdf documents are supported."
+            )
+        if not isinstance(data, str) or not data.strip():
+            raise ValueError(
+                f"messages[{message_index}].content[{block_index}].source.data must be a base64 string."
+            )
+        return {
+            "type": "input_file",
+            "filename": filename,
+            "file_data": f"data:{media_type.strip()};base64,{data.strip()}",
+        }
+
+    if source_type == "url":
+        url = source.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError(
+                f"messages[{message_index}].content[{block_index}].source.url must be a string."
+            )
+        return {
+            "type": "input_file",
+            "filename": filename,
+            "file_url": url.strip(),
+        }
+
+    if source_type == "file":
+        file_id = source.get("file_id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise ValueError(
+                f"messages[{message_index}].content[{block_index}].source.file_id must be a string."
+            )
+        return {
+            "type": "input_file",
+            "filename": filename,
+            "file_id": file_id.strip(),
+        }
+
+    raise ValueError(
+        f"messages[{message_index}].content[{block_index}].source.type '{source_type}' is not supported."
+    )
+
+
+def _extract_input_file_block(
+    block: dict[str, Any],
+    *,
+    message_index: int,
+    block_index: int,
+) -> dict[str, Any]:
+    file_id = block.get("file_id")
+    file_data = block.get("file_data")
+    file_url = block.get("file_url")
+    filename = block.get("filename")
+
+    if isinstance(filename, str) and filename.strip():
+        resolved_filename = filename.strip()
+    else:
+        resolved_filename = "document.pdf"
+
+    if isinstance(file_id, str) and file_id.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_id": file_id.strip(),
+        }
+
+    if isinstance(file_url, str) and file_url.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_url": file_url.strip(),
+        }
+
+    if isinstance(file_data, str) and file_data.strip():
+        return {
+            "type": "input_file",
+            "filename": resolved_filename,
+            "file_data": file_data.strip(),
+        }
+
+    raise ValueError(
+        f"messages[{message_index}].content[{block_index}] input_file blocks require file_id, file_url, or file_data."
+    )
+
+
+def _document_filename(block: dict[str, Any]) -> str:
+    for key in ("title", "filename", "name"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "document.pdf"
 
 
 def _convert_tool_result_output(raw_content: Any) -> str:
@@ -477,10 +714,7 @@ def _openai_response_to_anthropic_message(
         "content": content,
         "stop_reason": _map_response_stop_reason(upstream_response),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": _as_int(usage.get("input_tokens")),
-            "output_tokens": _as_int(usage.get("output_tokens")),
-        },
+        "usage": _anthropic_usage_from_openai_usage(usage),
     }
 
 
@@ -523,7 +757,7 @@ def _anthropic_sse_passthrough(
         response_id = f"msg_{uuid.uuid4().hex}"
         created_at = int(time.time())
         message_started = False
-        current_usage = {"input_tokens": 0, "output_tokens": 0}
+        current_usage = _anthropic_usage_from_openai_usage({})
         blocks_by_index: dict[int, dict[str, Any]] = {}
         blocks_by_item_id: dict[str, dict[str, Any]] = {}
 
@@ -587,8 +821,7 @@ def _anthropic_sse_passthrough(
                     response_id = upstream_id
                 usage_obj = response_obj.get("usage")
                 if isinstance(usage_obj, dict):
-                    current_usage["input_tokens"] = _as_int(usage_obj.get("input_tokens"))
-                    current_usage["output_tokens"] = _as_int(usage_obj.get("output_tokens"))
+                    current_usage = _anthropic_usage_from_openai_usage(usage_obj)
 
             if event_type == "response.created":
                 async for chunk in ensure_message_start(
@@ -765,8 +998,7 @@ def _anthropic_sse_passthrough(
                 completed_response = response_obj if isinstance(response_obj, dict) else {}
                 usage_obj = completed_response.get("usage")
                 if isinstance(usage_obj, dict):
-                    current_usage["input_tokens"] = _as_int(usage_obj.get("input_tokens"))
-                    current_usage["output_tokens"] = _as_int(usage_obj.get("output_tokens"))
+                    current_usage = _anthropic_usage_from_openai_usage(usage_obj)
                 async for chunk in emit(
                     "message_delta",
                     {
@@ -816,6 +1048,54 @@ def _anthropic_error_payload(status_code: int, payload: Any) -> dict[str, Any]:
             "message": message,
         },
     }
+
+
+def _anthropic_usage_from_openai_usage(usage: dict[str, Any]) -> dict[str, int]:
+    input_details = usage.get("input_tokens_details")
+    cached_tokens = 0
+    if isinstance(input_details, dict):
+        cached_tokens = _as_int(input_details.get("cached_tokens"))
+    return {
+        "input_tokens": _as_int(usage.get("input_tokens")),
+        "output_tokens": _as_int(usage.get("output_tokens")),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached_tokens,
+    }
+
+
+async def _raw_sse_passthrough(upstream_lines: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    async for line in upstream_lines:
+        yield f"{line}\n".encode("utf-8")
+
+
+def _prepare_native_message_request(raw_payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    payload = resolve_native_message_file_ids(dict(raw_payload), request.app.state.file_store)
+    if request.url.query:
+        payload["__proxy_query_string"] = request.url.query
+
+    forward_headers: dict[str, str] = {}
+    for header_name in ("anthropic-beta", "anthropic-version"):
+        header_value = request.headers.get(header_name)
+        if isinstance(header_value, str) and header_value.strip():
+            forward_headers[header_name] = header_value.strip()
+    if forward_headers:
+        payload["__proxy_forward_headers"] = forward_headers
+
+    if "cache_control" in payload:
+        return payload
+
+    beta_flag = request.query_params.get("beta")
+    if beta_flag is None:
+        return payload
+
+    if beta_flag.strip().lower() not in {"1", "true", "yes", "on"}:
+        return payload
+
+    # Claude Code commonly sends explicit block breakpoints sparingly. Add
+    # top-level automatic caching so the full stable prefix can advance as the
+    # conversation grows.
+    payload["cache_control"] = {"type": "ephemeral"}
+    return payload
 
 
 def _error_response(status_code: int, message: str) -> JSONResponse:

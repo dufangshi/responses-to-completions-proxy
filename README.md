@@ -1,6 +1,11 @@
 # Responses / Completions Compatibility Proxy
 
 一个 OpenAI 兼容代理，统一提供：
+- `POST /v1/files`
+- `GET /v1/files`
+- `GET /v1/files/{file_id}`
+- `GET /v1/files/{file_id}/content`
+- `DELETE /v1/files/{file_id}`
 - `POST /v1/responses`
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
@@ -194,6 +199,12 @@ RAW_IO_LOG_KEEP_REQUESTS=10
   - Anthropic Messages 风格入口
 - `POST /v1/message`
   - `POST /v1/messages` 的兼容别名
+- `POST /v1/files`
+  - OpenAI Files 兼容入口
+- `GET /v1/files`
+- `GET /v1/files/{file_id}`
+- `GET /v1/files/{file_id}/content`
+- `DELETE /v1/files/{file_id}`
 - `GET /v1/models`
 - `GET /v1/models/{model_id}`
 
@@ -205,6 +216,7 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 - `POST /v1/chat/completions`：兼容 chat 客户端（含工具调用）
 - `POST /v1/completions`：兼容老 prompt 接口
 - `POST /v1/messages`：兼容 Claude / Anthropic Messages 风格客户端
+- `POST /v1/files`：兼容 OpenAI SDK `client.files.create(...)`
 
 ---
 
@@ -274,6 +286,34 @@ curl -N http://127.0.0.1:18010/v1/messages \
 工具调用说明：
 - 当下游传入 Anthropic 风格 `tool_choice: {"type":"tool","name":"..."}` 时，proxy 会自动把工具列表裁成该工具，并向当前 Claude 风格上游发送等价的 `tool_choice: {"type":"any"}`，以兼容该上游的参数限制。
 
+### 5) `/v1/files`
+
+上传文件：
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/files \
+  -H "Authorization: Bearer test-local" \
+  -F "purpose=user_data" \
+  -F "file=@/path/to/paper.pdf" | python -m json.tool
+```
+
+查询文件：
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/files/file-xxxxxxxx | python -m json.tool
+```
+
+读取原始文件内容：
+
+```bash
+curl -L http://127.0.0.1:18010/v1/files/file-xxxxxxxx/content -o downloaded.pdf
+```
+
+说明：
+- proxy 不会把文件上传到上游 `/v1/files`
+- 文件会先保存在 proxy 本地，再在后续请求里自动展开成上游可接受的 `file_data`
+- 当前最适合的用途是 PDF 输入
+
 ---
 
 ## OpenAI Python SDK（本地指向 proxy）
@@ -286,6 +326,83 @@ client = OpenAI(base_url="http://127.0.0.1:18010/v1", api_key="test-local")
 for model in ["gpt-5.4", "claude-opus-4-6"]:
     r = client.responses.create(model=model, input="hello")
     print("requested =", model, "actual =", r.model, "text =", r.output_text)
+```
+
+### OpenAI Python SDK：先上传 PDF，再在请求里引用 `file_id`
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:18010/v1", api_key="test-local")
+
+with open("paper.pdf", "rb") as f:
+    uploaded = client.files.create(file=f, purpose="user_data")
+
+response = client.responses.create(
+    model="gpt-5.4",
+    input=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize this PDF."},
+                {"type": "input_file", "file_id": uploaded.id},
+            ],
+        }
+    ],
+)
+
+print(uploaded.id)
+print(response.output_text)
+```
+
+### OpenAI Python SDK：`chat.completions` + `file_id`
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:18010/v1", api_key="test-local")
+
+with open("paper.pdf", "rb") as f:
+    uploaded = client.files.create(file=f, purpose="user_data")
+
+chat = client.chat.completions.create(
+    model="gpt-5.4",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Summarize this PDF."},
+                {"type": "input_file", "file_id": uploaded.id},
+            ],
+        }
+    ],
+)
+
+print(chat.choices[0].message.content)
+```
+
+### Anthropic `/v1/messages`：`document.source.type=file`
+
+```bash
+FILE_ID="file-xxxxxxxx"
+
+curl -sS http://127.0.0.1:18010/v1/messages \
+  -H 'x-api-key: test-local' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"model\":\"ignored-by-proxy\",
+    \"max_tokens\":256,
+    \"messages\":[
+      {
+        \"role\":\"user\",
+        \"content\":[
+          {\"type\":\"text\",\"text\":\"Summarize this PDF.\"},
+          {\"type\":\"document\",\"title\":\"paper.pdf\",\"source\":{\"type\":\"file\",\"file_id\":\"${FILE_ID}\"}}
+        ]
+      }
+    ]
+  }" | python -m json.tool
 ```
 
 ---
@@ -330,13 +447,19 @@ docker run -d --name completions-proxy \
   -e APP_PORT=18010 \
   -p 18010:18010 \
   -v "$(pwd)/logs:/app/logs" \
+  -v "$(pwd)/data:/app/data" \
   ghcr.io/dufangshi/responses-to-completions-proxy:latest
 ```
+
+补充：
+- `./data` 用来持久化 `/v1/files` 上传的本地文件
+- 如果你删掉这个目录，之前返回过的 `file_id` 就会失效
 
 ---
 
 ## 代码入口
 
+- `/v1/files`：`app/routes/files.py`
 - `/v1/completions`：`app/routes/completions.py`
 - `/v1/chat/completions`：`app/routes/chat_completions.py`
 - `/v1/responses`：`app/routes/responses.py`
