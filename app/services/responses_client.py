@@ -69,6 +69,9 @@ class OpenAIResponsesGateway(BaseResponsesGateway):
         )
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._settings.upstream_streaming_enabled:
+            stream_iter = await self.stream_response(payload)
+            return await _collect_completed_response_from_sse(stream_iter)
         self._raw_logger.log(
             "upstream.request",
             {"provider": "openai", "path": "/responses", "stream": False, "payload": payload},
@@ -399,7 +402,7 @@ class GeminiResponsesGateway(BaseResponsesGateway):
         return iterator()
 
     def _resolve_fallback_model(self, requested_model: str, error: UpstreamAPIError) -> str | None:
-        fallback_model = self._settings.gemini_fallback_model
+        fallback_model = self._settings.upstream_fallback_model
         if not fallback_model:
             return None
         if fallback_model.strip().lower() == requested_model.strip().lower():
@@ -671,32 +674,36 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
     def __init__(self, settings: Settings, raw_logger: RawIOLogger | None = None):
         self._settings = settings
         self._raw_logger = raw_logger or RawIOLogger.from_settings(settings)
-        self._request_interval_seconds = float(settings.gemini_min_request_interval_seconds)
+        self._request_interval_seconds = float(settings.upstream_min_request_interval_seconds)
         self._request_lock = asyncio.Lock()
         self._last_request_started_at = 0.0
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if settings.upstream_gemini_api_key:
-            headers["Authorization"] = f"Bearer {settings.upstream_gemini_api_key}"
-            headers["x-api-key"] = settings.upstream_gemini_api_key
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "x-api-key": settings.upstream_api_key,
+            "anthropic-version": settings.upstream_messages_api_version,
+        }
         self._client = httpx.AsyncClient(
-            base_url=settings.upstream_gemini_base_url,
+            base_url=settings.upstream_base_url,
             timeout=settings.upstream_timeout_seconds,
             headers=headers,
         )
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self._settings.upstream_gemini_api_key:
+        if not self._settings.upstream_api_key:
             raise UpstreamAPIError(
                 500,
                 {
                     "error": {
-                        "message": "UPSTREAM_ANTIGRAVITY_API_KEY is required for antigravity models.",
+                        "message": "UPSTREAM_API_KEY is required for messages mode.",
                         "type": "server_error",
                         "param": None,
-                        "code": "antigravity_api_key_missing",
+                        "code": "upstream_api_key_missing",
                     }
                 },
             )
+        if self._settings.upstream_streaming_enabled:
+            stream_iter = await self.stream_response(payload)
+            return await _collect_completed_response_from_sse(stream_iter)
 
         requested_model = _extract_model(payload)
         try:
@@ -736,7 +743,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         normalized_payload = _normalize_max_output_tokens_for_model(payload, target_model)
         payload_variant = dict(normalized_payload)
         payload_variant["model"] = target_model
-        path = "/v1/messages"
+        path = "/messages"
         raw_response = await self._perform_non_stream_request(
             payload_variant=payload_variant,
             path=path,
@@ -746,15 +753,15 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         return antigravity_message_to_openai_response(raw_response, model=response_model)
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[str]:
-        if not self._settings.upstream_gemini_api_key:
+        if not self._settings.upstream_api_key:
             raise UpstreamAPIError(
                 500,
                 {
                     "error": {
-                        "message": "UPSTREAM_ANTIGRAVITY_API_KEY is required for antigravity models.",
+                        "message": "UPSTREAM_API_KEY is required for messages mode.",
                         "type": "server_error",
                         "param": None,
-                        "code": "antigravity_api_key_missing",
+                        "code": "upstream_api_key_missing",
                     }
                 },
             )
@@ -798,7 +805,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         payload_variant = dict(normalized_payload)
         payload_variant["model"] = target_model
         payload_variant["stream"] = True
-        path = "/v1/messages"
+        path = "/messages"
         response = await self._perform_stream_request(
             payload_variant=payload_variant,
             path=path,
@@ -1171,7 +1178,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         return iterator()
 
     def _resolve_fallback_model(self, requested_model: str, error: UpstreamAPIError) -> str | None:
-        fallback_model = self._settings.gemini_fallback_model
+        fallback_model = self._settings.upstream_fallback_model
         if not fallback_model:
             return None
         if fallback_model.strip().lower() == requested_model.strip().lower():
@@ -1409,22 +1416,19 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         self,
         *,
         settings: Settings,
-        openai_gateway: OpenAIResponsesGateway,
-        antigravity_gateway: AntigravityResponsesGateway,
+        upstream_gateway: BaseResponsesGateway,
         raw_logger: RawIOLogger | None = None,
     ):
         self._settings = settings
-        self._openai_gateway = openai_gateway
-        self._antigravity_gateway = antigravity_gateway
+        self._upstream_gateway = upstream_gateway
         self._raw_logger = raw_logger or RawIOLogger.from_settings(settings)
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         attempts = self._build_attempt_payloads(payload)
         last_error: UpstreamAPIError | None = None
         for index, attempt_payload in enumerate(attempts):
-            gateway = self._pick_gateway(attempt_payload)
             try:
-                return await gateway.create_response(attempt_payload)
+                return await self._upstream_gateway.create_response(attempt_payload)
             except UpstreamAPIError as exc:
                 last_error = exc
                 has_next = index < len(attempts) - 1
@@ -1458,9 +1462,8 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         attempts = self._build_attempt_payloads(payload)
         last_error: UpstreamAPIError | None = None
         for index, attempt_payload in enumerate(attempts):
-            gateway = self._pick_gateway(attempt_payload)
             try:
-                return await gateway.stream_response(attempt_payload)
+                return await self._upstream_gateway.stream_response(attempt_payload)
             except UpstreamAPIError as exc:
                 last_error = exc
                 has_next = index < len(attempts) - 1
@@ -1491,19 +1494,7 @@ class RoutingResponsesGateway(BaseResponsesGateway):
         )
 
     async def close(self) -> None:
-        await self._openai_gateway.close()
-        await self._antigravity_gateway.close()
-
-    def _pick_gateway(self, payload: dict[str, Any]) -> BaseResponsesGateway:
-        model = _extract_model(payload)
-        provider = "openai" if self._settings.is_openai_model(model) else "antigravity"
-        self._raw_logger.log(
-            "proxy.route.provider",
-            {"model": model, "provider": provider},
-        )
-        if provider == "antigravity":
-            return self._antigravity_gateway
-        return self._openai_gateway
+        await self._upstream_gateway.close()
 
     def _build_attempt_payloads(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         force_chain = self._settings.force_model_chain()
@@ -1579,6 +1570,56 @@ async def _iter_sse_json_payloads(lines: AsyncIterator[str]) -> AsyncIterator[di
     payload = _flush_sse_data_lines(data_lines)
     if payload is not None:
         yield payload
+
+
+async def _collect_completed_response_from_sse(lines: AsyncIterator[str]) -> dict[str, Any]:
+    last_response: dict[str, Any] | None = None
+    async for payload in _iter_sse_json_payloads(lines):
+        if payload == "[DONE]":
+            break
+        if not isinstance(payload, dict):
+            continue
+        payload_type = payload.get("type")
+        if payload_type == "response.completed":
+            response_obj = payload.get("response")
+            if isinstance(response_obj, dict):
+                return response_obj
+        if payload_type == "response.failed":
+            response_obj = payload.get("response")
+            if isinstance(response_obj, dict):
+                error_obj = response_obj.get("error")
+                raise UpstreamAPIError(
+                    502,
+                    {
+                        "error": error_obj
+                        if isinstance(error_obj, dict)
+                        else {
+                            "message": "Upstream streaming request failed.",
+                            "type": "server_error",
+                            "param": None,
+                            "code": "upstream_stream_failed",
+                        },
+                    },
+                )
+        if payload_type == "response.created":
+            response_obj = payload.get("response")
+            if isinstance(response_obj, dict):
+                last_response = response_obj
+
+    if last_response is not None:
+        return last_response
+
+    raise UpstreamAPIError(
+        502,
+        {
+            "error": {
+                "message": "Upstream streaming request completed without a final response payload.",
+                "type": "server_error",
+                "param": None,
+                "code": "missing_stream_completion",
+            }
+        },
+    )
 
 
 def _flush_sse_data_lines(data_lines: list[str]) -> dict[str, Any] | str | None:

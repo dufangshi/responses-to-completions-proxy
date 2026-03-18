@@ -26,12 +26,13 @@ logger = logging.getLogger("compat_proxy")
 async def lifespan(app: FastAPI):
     settings = Settings.from_env()
     raw_logger = RawIOLogger.from_settings(settings)
-    openai_gateway = OpenAIResponsesGateway(settings, raw_logger=raw_logger)
-    antigravity_gateway = AntigravityResponsesGateway(settings, raw_logger=raw_logger)
+    if settings.upstream_mode == "messages":
+        upstream_gateway = AntigravityResponsesGateway(settings, raw_logger=raw_logger)
+    else:
+        upstream_gateway = OpenAIResponsesGateway(settings, raw_logger=raw_logger)
     gateway = RoutingResponsesGateway(
         settings=settings,
-        openai_gateway=openai_gateway,
-        antigravity_gateway=antigravity_gateway,
+        upstream_gateway=upstream_gateway,
         raw_logger=raw_logger,
     )
     app.state.settings = settings

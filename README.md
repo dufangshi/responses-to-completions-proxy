@@ -5,49 +5,101 @@
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
 
-并按模型自动路由上游：
-- OpenAI 路由：`/v1/responses`
-- Antigravity 路由：`/antigravity/v1/messages`（Gemini / Claude）
+当前版本只支持单一上游。
+
+代理对外始终保持 OpenAI 兼容接口，但你可以在配置里切换单一上游的请求模式：
+- `UPSTREAM_MODE=responses`：上游走 `POST /v1/responses`
+- `UPSTREAM_MODE=messages`：上游走 `POST /v1/messages`
 
 ---
 
-## 一键启动（Docker）
+## 推荐用法：统一管理脚本
+
+仓库根目录提供了一个入口脚本：`./proxy.sh`
+
+常用命令：
 
 ```bash
-docker compose up -d --build
-curl -sS http://127.0.0.1:18010/healthz
+./proxy.sh setup
+./proxy.sh config
+./proxy.sh up
+./proxy.sh down
+./proxy.sh logs
+./proxy.sh status
+./proxy.sh update
+```
+
+- `setup`：首次安装，交互式写入 `.env`，然后启动容器
+- `config`：重新输入配置，自动备份旧 `.env`，然后重建容器
+- `update`：在工作区干净时自动 `git pull --rebase --autostash`，然后重建容器
+
+---
+
+## 一键启动
+
+```bash
+chmod +x ./proxy.sh
+./proxy.sh setup
 ```
 
 服务默认地址：`http://127.0.0.1:18010`
 
 ---
 
-## 环境变量（精简）
+## 重配与更新
+
+重新输入配置：
+
+```bash
+./proxy.sh config
+```
+
+提示：
+- 直接回车：保留当前值
+- 输入 `-`：清空当前值（适合 `FORCE_UPSTREAM_MODEL` / `MODEL_MAP` 这类可选项）
+
+拉最新代码并重建容器：
+
+```bash
+./proxy.sh update
+```
+
+查看状态和日志：
+
+```bash
+./proxy.sh status
+./proxy.sh logs
+```
+
+---
+
+## 环境变量（高级）
 
 只需要这 3 个必填项：
 
 ```env
 UPSTREAM_BASE_URL=https://sub.lnz-study.com
-UPSTREAM_OPENAI_API_KEY=sk-xxx
-UPSTREAM_ANTIGRAVITY_API_KEY=sk-xxx
+UPSTREAM_MODE=responses
+UPSTREAM_STREAMING_ENABLED=true
+UPSTREAM_API_KEY=sk-xxx
 ```
 
 > 注意：仓库不会提交你的 `.env`（`.gitignore` 已忽略 `.env`），所以拉取最新代码不会自动改你服务器上的 `.env`。
+>
+> 如果你使用 `./proxy.sh setup` 或 `./proxy.sh config`，脚本会自动写入 `.env`，一般不需要手工编辑。
 
 其余常用项：
 
 ```env
 APP_HOST=127.0.0.1
 APP_PORT=18010
+UPSTREAM_MESSAGES_API_VERSION=2023-06-01
 UPSTREAM_TIMEOUT_SECONDS=120
+UPSTREAM_STREAMING_ENABLED=true
 
 # 限流与降级
-ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS=10
-ANTIGRAVITY_FALLBACK_MODEL=gemini-3-flash-preview
-
-# 可选：覆盖自动拼接地址
-# UPSTREAM_OPENAI_BASE_URL=https://sub.lnz-study.com/v1
-# UPSTREAM_ANTIGRAVITY_BASE_URL=https://sub.lnz-study.com/antigravity
+UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS=10
+UPSTREAM_FALLBACK_MODEL=
 
 # 强制模型链
 USE_FORCE_MODEL=false
@@ -57,9 +109,6 @@ DEFAULT_UPSTREAM_MODEL=gpt-5.3-codex
 # 仅 gpt-5.3-codex 生效
 DEFAULT_REASONING_EFFORT=high
 
-# 哪些前缀走 OpenAI 路由（其余都走 Antigravity）
-OPENAI_MODEL_PREFIXES=gpt-,o1,o3,o4,text-embedding,text-moderation,whisper,tts,dall-e,omni
-
 # 调试日志
 RAW_IO_LOG_ENABLED=false
 RAW_IO_LOG_PATH=logs/raw_io.jsonl
@@ -67,41 +116,37 @@ RAW_IO_LOG_MAX_CHARS=120000
 RAW_IO_LOG_KEEP_REQUESTS=10
 ```
 
-> 说明：`UPSTREAM_BASE_URL` 只需填根域名，代理会自动拼接：
-> - OpenAI：`/v1`
-> - Antigravity：`/antigravity`
+> 说明：
+> - `UPSTREAM_BASE_URL` 可以写根域名，也可以直接写到 `/v1`
+> - 代理内部会统一规范到 `/v1`
+> - `UPSTREAM_MODE=messages` 时，请求会发到 `/v1/messages`
+> - `UPSTREAM_MODE=responses` 时，请求会发到 `/v1/responses`
+> - 默认 `UPSTREAM_STREAMING_ENABLED=true`，也就是即使客户端发普通非流式请求，proxy 也会优先用上游流式并在本地聚合结果
 
 ### 旧 `.env` 键名迁移（从旧版本升级时）
 
-若你之前使用的是旧键名，可按下面方式迁移到新键名：
+若你之前使用的是双上游版本，推荐直接重新执行：
 
 ```bash
-# 备份
-cp .env .env.bak.$(date +%Y%m%d-%H%M%S)
-
-# 旧键名 -> 新键名
-sed -i '' 's/^UPSTREAM_API_KEY=/UPSTREAM_OPENAI_API_KEY=/' .env
-sed -i '' 's/^UPSTREAM_GEMINI_API_KEY=/UPSTREAM_ANTIGRAVITY_API_KEY=/' .env
-sed -i '' 's/^GEMINI_MIN_REQUEST_INTERVAL_SECONDS=/ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS=/' .env
-sed -i '' 's/^GEMINI_FALLBACK_MODEL=/ANTIGRAVITY_FALLBACK_MODEL=/' .env
+./proxy.sh config
 ```
 
-如果是 Linux（GNU sed），把 `sed -i ''` 改为 `sed -i`。
-
-兼容性说明：当前版本不兼容旧键名；若仍使用旧键名，服务会在启动时直接报错退出。
+旧版的双上游变量不再是推荐配置方式。
 
 ---
 
-## 自动路由规则
+## 上游模式切换
 
-1. 先解析 `model`（支持 `gpt-5.3-codex:high` 这种写法）
-2. 若命中 `OPENAI_MODEL_PREFIXES`，走 OpenAI 上游 `/v1/responses`
-3. 否则走 Antigravity `/v1/messages`
+模式由 `UPSTREAM_MODE` 控制：
 
-当前典型结果：
-- `gpt-5.3-codex` → OpenAI
-- `gemini-3.1-pro-high` → Antigravity
-- `claude-opus-4-6` → Antigravity
+- `responses`
+  - 上游请求：`POST /v1/responses`
+  - 适合 OpenAI Responses 风格上游
+- `messages`
+  - 上游请求：`POST /v1/messages`
+  - 适合 Claude Messages 风格上游
+
+模型名仍然由客户端正常传入，代理不会再按模型前缀把请求拆到不同上游。
 
 ---
 
@@ -158,7 +203,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:18010/v1", api_key="test-local")
 
-for model in ["gpt-5.3-codex", "gemini-3.1-pro-high", "claude-opus-4-6"]:
+for model in ["gpt-5.3-codex", "claude-opus-4-6"]:
     r = client.responses.create(model=model, input="hello")
     print(model, r.output_text)
 ```
@@ -179,26 +224,18 @@ for model in ["gpt-5.3-codex", "gemini-3.1-pro-high", "claude-opus-4-6"]:
 
 ---
 
-## 容器镜像更新与重启
+## 手动 Docker 命令（如果你不用脚本）
 
-### 服务器侧一键更新（推荐）
-
-```bash
-cd /path/to/responses-to-completions-proxy
-git pull --rebase origin main
-docker compose pull completions-proxy
-# 处理同名旧容器冲突（例如之前用 docker run 创建过）
-docker rm -f completions-proxy 2>/dev/null || true
-docker compose up -d --no-build completions-proxy
-docker compose ps
-curl -sS http://127.0.0.1:18010/healthz
-```
+如果你修改了 `.env`，要注意：
+- `docker compose up -d --build` 不一定会刷新运行中容器的环境变量
+- 最稳妥的方式是先删掉服务容器，再重新创建
 
 ### docker compose
 
 ```bash
-docker compose pull completions-proxy
-docker compose up -d --no-build completions-proxy
+docker rm -f completions-proxy 2>/dev/null || true
+docker compose rm -sf completions-proxy
+docker compose up -d --build completions-proxy
 ```
 
 ### docker run

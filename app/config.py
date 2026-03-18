@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 REASONING_EFFORT_MODEL = "gpt-5.3-codex"
+ALLOWED_UPSTREAM_MODES = {"responses", "messages"}
 
 
 def _parse_model_map(raw_value: str) -> dict[str, str]:
@@ -42,6 +43,17 @@ def _parse_reasoning_effort(raw_value: str) -> str | None:
     if value not in ALLOWED_REASONING_EFFORTS:
         raise ValueError(
             "DEFAULT_REASONING_EFFORT must be one of: low, medium, high, xhigh."
+        )
+    return value
+
+
+def _parse_upstream_mode(raw_value: str) -> str:
+    value = raw_value.strip().lower()
+    if not value:
+        return "responses"
+    if value not in ALLOWED_UPSTREAM_MODES:
+        raise ValueError(
+            "UPSTREAM_MODE must be one of: responses, messages."
         )
     return value
 
@@ -102,7 +114,7 @@ def _parse_non_negative_float(raw_value: str, default: float) -> float:
         return default
     parsed = float(value)
     if parsed < 0:
-        raise ValueError("ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS must be >= 0.")
+        raise ValueError("UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS must be >= 0.")
     return parsed
 
 
@@ -176,17 +188,17 @@ class Settings:
     app_port: int
     upstream_base_url: str
     upstream_api_key: str
-    upstream_gemini_base_url: str
-    upstream_gemini_api_key: str
+    upstream_mode: str
+    upstream_streaming_enabled: bool
+    upstream_messages_api_version: str
     upstream_timeout_seconds: float
-    gemini_min_request_interval_seconds: float
-    gemini_fallback_model: str | None
+    upstream_min_request_interval_seconds: float
+    upstream_fallback_model: str | None
     use_force_model: bool
     force_upstream_models: tuple[str, ...]
     default_upstream_model: str
     default_reasoning_effort: str | None
     model_map: dict[str, str]
-    openai_model_prefixes: tuple[str, ...]
     raw_io_log_enabled: bool
     raw_io_log_path: str
     raw_io_log_max_chars: int
@@ -197,45 +209,45 @@ class Settings:
         load_dotenv()
         raw_model_map = os.getenv("MODEL_MAP", "")
         model_map = _parse_model_map(raw_model_map)
+        upstream_mode = _parse_upstream_mode(os.getenv("UPSTREAM_MODE", "responses"))
         upstream_root = _derive_upstream_root(
             os.getenv("UPSTREAM_BASE_URL", "https://api.openai.com")
         )
-        openai_base_url = _ensure_url_suffix(
-            os.getenv("UPSTREAM_OPENAI_BASE_URL", "").strip() or upstream_root,
+        upstream_base_url = _ensure_url_suffix(
+            os.getenv("UPSTREAM_MODE_BASE_URL", "").strip() or upstream_root,
             "/v1",
         )
-        antigravity_base_url = _ensure_url_suffix(
-            os.getenv("UPSTREAM_ANTIGRAVITY_BASE_URL", "").strip() or upstream_root,
-            "/antigravity",
-        )
-        openai_api_key = os.getenv("UPSTREAM_OPENAI_API_KEY", "").strip()
-        if not openai_api_key:
-            raise ValueError("UPSTREAM_OPENAI_API_KEY is required.")
+        upstream_api_key = os.getenv("UPSTREAM_API_KEY", "").strip()
+        if not upstream_api_key:
+            raise ValueError("UPSTREAM_API_KEY is required.")
 
-        antigravity_api_key = os.getenv("UPSTREAM_ANTIGRAVITY_API_KEY", "").strip()
-        if not antigravity_api_key:
-            raise ValueError("UPSTREAM_ANTIGRAVITY_API_KEY is required.")
-
-        antigravity_interval_raw = os.getenv(
-            "ANTIGRAVITY_MIN_REQUEST_INTERVAL_SECONDS", "10"
+        upstream_interval_raw = os.getenv(
+            "UPSTREAM_MIN_REQUEST_INTERVAL_SECONDS", "10"
         ).strip()
-        antigravity_fallback_raw = os.getenv(
-            "ANTIGRAVITY_FALLBACK_MODEL", "gemini-3-flash-preview"
+        upstream_fallback_raw = os.getenv(
+            "UPSTREAM_FALLBACK_MODEL", ""
         ).strip()
         return cls(
             app_host=os.getenv("APP_HOST", "127.0.0.1"),
             app_port=int(os.getenv("APP_PORT", "18010")),
-            upstream_base_url=openai_base_url,
-            upstream_api_key=openai_api_key,
-            upstream_gemini_base_url=antigravity_base_url,
-            upstream_gemini_api_key=antigravity_api_key,
+            upstream_base_url=upstream_base_url,
+            upstream_api_key=upstream_api_key,
+            upstream_mode=upstream_mode,
+            upstream_streaming_enabled=_parse_bool(
+                os.getenv("UPSTREAM_STREAMING_ENABLED", "true"),
+                default=True,
+            ),
+            upstream_messages_api_version=os.getenv(
+                "UPSTREAM_MESSAGES_API_VERSION", "2023-06-01"
+            ).strip()
+            or "2023-06-01",
             upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")),
-            gemini_min_request_interval_seconds=_parse_non_negative_float(
-                antigravity_interval_raw,
+            upstream_min_request_interval_seconds=_parse_non_negative_float(
+                upstream_interval_raw,
                 default=10.0,
             ),
-            gemini_fallback_model=_parse_optional_str(
-                antigravity_fallback_raw
+            upstream_fallback_model=_parse_optional_str(
+                upstream_fallback_raw
             ),
             use_force_model=_parse_bool(os.getenv("USE_FORCE_MODEL", ""), default=False),
             force_upstream_models=_parse_force_model_list(
@@ -246,24 +258,6 @@ class Settings:
                 os.getenv("DEFAULT_REASONING_EFFORT", "high")
             ),
             model_map=model_map,
-            openai_model_prefixes=_parse_csv(
-                os.getenv(
-                    "OPENAI_MODEL_PREFIXES",
-                    "gpt-,o1,o3,o4,text-embedding,text-moderation,whisper,tts,dall-e,omni",
-                ),
-                default=(
-                    "gpt-",
-                    "o1",
-                    "o3",
-                    "o4",
-                    "text-embedding",
-                    "text-moderation",
-                    "whisper",
-                    "tts",
-                    "dall-e",
-                    "omni",
-                ),
-            ),
             raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
             raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),
             raw_io_log_max_chars=_parse_positive_int(
@@ -297,12 +291,6 @@ class Settings:
             reasoning_effort = None
 
         return resolved_model, reasoning_effort
-
-    def is_openai_model(self, model_name: str) -> bool:
-        normalized = model_name.strip().lower()
-        if not normalized:
-            return True
-        return any(normalized.startswith(prefix) for prefix in self.openai_model_prefixes)
 
     def force_model_chain(self) -> tuple[str, ...]:
         if not self.use_force_model:
