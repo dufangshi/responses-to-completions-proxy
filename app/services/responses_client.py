@@ -913,10 +913,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                         if not isinstance(function_name, str) or not function_name.strip():
                             function_name = "tool"
                         raw_input = block.get("input")
-                        if isinstance(raw_input, dict):
-                            arguments_text = json.dumps(raw_input, ensure_ascii=False, separators=(",", ":"))
-                        else:
-                            arguments_text = ""
+                        initial_input = raw_input if isinstance(raw_input, dict) else None
                         item_id = f"item_{call_id}"
                         output_index = next_output_index
                         next_output_index += 1
@@ -924,7 +921,8 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                             "item_id": item_id,
                             "call_id": call_id,
                             "name": function_name,
-                            "arguments": arguments_text,
+                            "arguments": "",
+                            "initial_input": initial_input,
                             "output_index": output_index,
                         }
                         tool_state_by_index[index] = state
@@ -938,7 +936,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                                         "id": item_id,
                                         "call_id": call_id,
                                         "name": function_name,
-                                        "arguments": arguments_text,
+                                        "arguments": "",
                                     },
                                     "output_index": output_index,
                                 },
@@ -1025,6 +1023,14 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                         arguments_text = state.get("arguments")
                         if not isinstance(arguments_text, str):
                             arguments_text = ""
+                        if not arguments_text:
+                            initial_input = state.get("initial_input")
+                            if isinstance(initial_input, dict):
+                                arguments_text = json.dumps(
+                                    initial_input,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
                         completed_tool_calls.append(
                             {
                                 "output_index": int(state.get("output_index", 0)),
@@ -1209,11 +1215,17 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 now = time.monotonic()
             self._last_request_started_at = now
 
-    async def _post_with_retry(self, *, path: str, payload: dict[str, Any]) -> httpx.Response:
+    async def _post_with_retry(
+        self,
+        *,
+        path: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                response = await self._client.post(path, json=payload)
+                response = await self._client.post(path, json=payload, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt >= attempts:
                     raise
@@ -1224,7 +1236,7 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
                 await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
                 continue
             return response
-        return await self._client.post(path, json=payload)
+        return await self._client.post(path, json=payload, headers=headers)
 
     async def _send_with_retry(self, request: httpx.Request) -> httpx.Response:
         attempts = 3
@@ -1291,7 +1303,12 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             },
         )
         await self._wait_for_rate_slot()
-        response = await self._post_with_retry(path=path, payload=antigravity_payload)
+        extra_headers = self._extra_headers_for_payload(antigravity_payload)
+        response = await self._post_with_retry(
+            path=path,
+            payload=antigravity_payload,
+            headers=extra_headers or None,
+        )
         self._raw_logger.log(
             "upstream.response",
             {
@@ -1376,7 +1393,10 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             "POST",
             path,
             json=antigravity_payload,
-            headers={"Accept": "text/event-stream"},
+            headers={
+                "Accept": "text/event-stream",
+                **self._extra_headers_for_payload(antigravity_payload),
+            },
         )
         await self._wait_for_rate_slot()
         response = await self._send_with_retry(request)
@@ -1409,6 +1429,12 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
             response.status_code,
             antigravity_error_to_openai_error(response.status_code, raw_error),
         )
+
+    def _extra_headers_for_payload(self, payload: dict[str, Any]) -> dict[str, str]:
+        speed = payload.get("speed")
+        if isinstance(speed, str) and speed.strip().lower() == "fast":
+            return {"anthropic-beta": "fast-mode-2026-02-01"}
+        return {}
 
 
 class RoutingResponsesGateway(BaseResponsesGateway):

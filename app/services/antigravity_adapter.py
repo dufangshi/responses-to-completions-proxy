@@ -31,11 +31,29 @@ def build_antigravity_request_from_responses(payload: dict[str, Any]) -> dict[st
     if system_texts:
         request_payload["system"] = "\n\n".join(part for part in system_texts if part.strip())
 
+    speed = _string(payload.get("speed")).strip().lower()
+    if speed:
+        request_payload["speed"] = speed
+
+    reasoning = _convert_reasoning(payload.get("reasoning"))
+    if reasoning is not None:
+        _apply_reasoning(request_payload, model, reasoning)
+
     tools = _convert_tools(payload.get("tools"))
+    tool_choice = _convert_tool_choice(payload.get("tool_choice"))
     if tools:
+        forced_tool_name = _extract_forced_tool_name(tool_choice)
+        if forced_tool_name:
+            filtered_tools = [
+                tool
+                for tool in tools
+                if _string(tool.get("name")).strip() == forced_tool_name
+            ]
+            if filtered_tools:
+                tools = filtered_tools
+                tool_choice = {"type": "any"}
         request_payload["tools"] = tools
 
-    tool_choice = _convert_tool_choice(payload.get("tool_choice"))
     if tool_choice is not None:
         request_payload["tool_choice"] = tool_choice
 
@@ -368,6 +386,51 @@ def _convert_tool_choice(raw_tool_choice: Any) -> dict[str, Any] | None:
     return None
 
 
+def _extract_forced_tool_name(tool_choice: dict[str, Any] | None) -> str | None:
+    if not isinstance(tool_choice, dict):
+        return None
+    if _string(tool_choice.get("type")).strip().lower() != "tool":
+        return None
+    name = _string(tool_choice.get("name")).strip()
+    return name or None
+
+
+def _convert_reasoning(raw_reasoning: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_reasoning, dict):
+        return None
+
+    effort = _string(raw_reasoning.get("effort")).strip().lower()
+    if not effort:
+        return None
+
+    return {"effort": effort}
+
+
+def _apply_reasoning(
+    request_payload: dict[str, Any],
+    model: str,
+    reasoning: dict[str, Any],
+) -> None:
+    effort = _string(reasoning.get("effort")).strip().lower()
+    if not effort:
+        return
+
+    if _is_claude_effort_model(model):
+        request_payload["output_config"] = {"effort": effort}
+        return
+
+    request_payload["reasoning"] = {"effort": effort}
+
+
+def _is_claude_effort_model(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized in {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+    }
+
+
 def _resolve_max_tokens(payload: dict[str, Any], model: str) -> int:
     raw_value = payload.get("max_output_tokens")
     if raw_value is None:
@@ -468,4 +531,3 @@ def _string(value: Any) -> str:
     if isinstance(value, str):
         return value
     return ""
-

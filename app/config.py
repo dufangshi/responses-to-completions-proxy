@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
-REASONING_EFFORT_MODEL = "gpt-5.3-codex"
+REASONING_EFFORT_MODELS = {
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-opus-4-5",
+}
 ALLOWED_UPSTREAM_MODES = {"responses", "messages"}
 
 
@@ -78,7 +84,7 @@ def _extract_model_reasoning_effort(model_name: str | None) -> tuple[str | None,
 
 
 def _supports_reasoning_effort(model_name: str) -> bool:
-    return model_name.strip().lower() == REASONING_EFFORT_MODEL
+    return model_name.strip().lower() in REASONING_EFFORT_MODELS
 
 
 def _parse_bool(raw_value: str, default: bool = False) -> bool:

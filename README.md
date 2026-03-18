@@ -4,10 +4,20 @@
 - `POST /v1/responses`
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
+- `POST /v1/messages`
+- `POST /v1/message`（`/v1/messages` 的兼容别名）
+- `GET /v1/models`
+- `GET /v1/models/{model_id}`
 
 当前版本只支持单一上游。
 
-代理对外始终保持 OpenAI 兼容接口，但你可以在配置里切换单一上游的请求模式：
+代理对外同时兼容：
+- OpenAI SDK / Responses API
+- OpenAI Chat Completions API
+- OpenAI legacy Completions API
+- Anthropic Messages 风格请求
+
+你可以在配置里切换单一上游的请求模式：
 - `UPSTREAM_MODE=responses`：上游走 `POST /v1/responses`
 - `UPSTREAM_MODE=messages`：上游走 `POST /v1/messages`
 
@@ -106,7 +116,7 @@ USE_FORCE_MODEL=false
 FORCE_UPSTREAM_MODEL=
 DEFAULT_UPSTREAM_MODEL=gpt-5.3-codex
 
-# 仅 gpt-5.3-codex 生效
+# 对 gpt-5.3-codex / gpt-5.4 / claude-opus-4-6 / claude-sonnet-4-6 / claude-opus-4-5 生效
 DEFAULT_REASONING_EFFORT=high
 
 # 调试日志
@@ -150,13 +160,29 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 
 ---
 
-## 三个入口分别做什么
+## 下游支持的请求格式
+
+- `POST /v1/responses`
+  - OpenAI Responses 原生入口
+- `POST /v1/chat/completions`
+  - OpenAI Chat Completions 兼容入口
+- `POST /v1/completions`
+  - OpenAI 老式 prompt/completions 兼容入口
+- `POST /v1/messages`
+  - Anthropic Messages 风格入口
+- `POST /v1/message`
+  - `POST /v1/messages` 的兼容别名
+- `GET /v1/models`
+- `GET /v1/models/{model_id}`
+
+所有主要 POST 入口都支持 `stream: true`。
+
+## 四个主要入口分别做什么
 
 - `POST /v1/responses`：新 SDK 推荐入口（原生 Responses）
 - `POST /v1/chat/completions`：兼容 chat 客户端（含工具调用）
 - `POST /v1/completions`：兼容老 prompt 接口
-
-三个入口都支持 `stream: true`。
+- `POST /v1/messages`：兼容 Claude / Anthropic Messages 风格客户端
 
 ---
 
@@ -193,6 +219,39 @@ curl -sS http://127.0.0.1:18010/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-5.3-codex","prompt":"hello"}' | python -m json.tool
 ```
+
+### 4) `/v1/messages`
+
+```bash
+curl -sS http://127.0.0.1:18010/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"claude-opus-4-6:low",
+    "max_tokens":128,
+    "messages":[
+      {
+        "role":"user",
+        "content":[{"type":"text","text":"Reply with hello only."}]
+      }
+    ]
+  }' | python -m json.tool
+```
+
+流式：
+
+```bash
+curl -N http://127.0.0.1:18010/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"claude-opus-4-6:medium",
+    "messages":[{"role":"user","content":"Reply with hello only."}],
+    "speed":"fast",
+    "stream":true
+  }'
+```
+
+工具调用说明：
+- 当下游传入 Anthropic 风格 `tool_choice: {"type":"tool","name":"..."}` 时，proxy 会自动把工具列表裁成该工具，并向当前 Claude 风格上游发送等价的 `tool_choice: {"type":"any"}`，以兼容该上游的参数限制。
 
 ---
 
