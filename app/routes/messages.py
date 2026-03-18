@@ -130,10 +130,6 @@ def _build_responses_payload_from_messages_request(
         if stops:
             payload["stop"] = stops
 
-    user_id = _extract_user_id(raw_payload.get("metadata"))
-    if user_id:
-        payload["user"] = user_id
-
     converted_tools = _convert_tools(raw_payload.get("tools"))
     if converted_tools:
         payload["tools"] = converted_tools
@@ -439,15 +435,6 @@ def _convert_tool_choice(raw_tool_choice: Any) -> str | dict[str, Any] | None:
             raise ValueError("tool_choice.name is required when tool_choice.type='tool'.")
         return {"type": "tool", "name": name.strip()}
     raise ValueError("tool_choice.type must be auto, any, tool, or none.")
-
-
-def _extract_user_id(raw_metadata: Any) -> str | None:
-    if not isinstance(raw_metadata, dict):
-        return None
-    user_id = raw_metadata.get("user_id")
-    if not isinstance(user_id, str) or not user_id.strip():
-        return None
-    return user_id.strip()
 
 
 def _openai_response_to_anthropic_message(

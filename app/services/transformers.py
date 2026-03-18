@@ -73,7 +73,6 @@ def build_responses_payload(
             max_tokens=request.max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
-            user=request.user,
             top_logprobs=request.logprobs,
         )
     )
@@ -145,7 +144,6 @@ def build_chat_responses_payload(
             max_tokens=resolve_chat_max_tokens(request),
             temperature=request.temperature,
             top_p=request.top_p,
-            user=request.user,
             top_logprobs=request.top_logprobs,
         ),
     }
@@ -446,7 +444,6 @@ def _build_shared_sampling_params(
     max_tokens: int | None,
     temperature: float | None,
     top_p: float | None,
-    user: str | None,
     top_logprobs: int | None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
@@ -456,8 +453,6 @@ def _build_shared_sampling_params(
         params["temperature"] = temperature
     if top_p is not None:
         params["top_p"] = top_p
-    if user:
-        params["user"] = user
     if top_logprobs is not None:
         params["top_logprobs"] = top_logprobs
     return params
