@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.services.file_store import resolve_native_message_file_ids, resolve_openai_payload_file_ids
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
+from app.services.responses_session_store import ResponsesSessionState, ResponsesSessionStore
 from app.services.streaming_adapter import iter_upstream_sse_events
 
 router = APIRouter()
@@ -82,6 +84,12 @@ async def create_message(request: Request) -> Response:
     except ValueError as exc:
         return _error_response(status.HTTP_400_BAD_REQUEST, str(exc))
 
+    session_context = await _prepare_responses_session_reuse(
+        request,
+        raw_payload=raw_payload,
+        payload=payload,
+    )
+
     if payload.get("stream") is True:
         try:
             upstream_lines = await gateway.stream_response(payload)
@@ -95,6 +103,7 @@ async def create_message(request: Request) -> Response:
             _anthropic_sse_passthrough(
                 upstream_lines=upstream_lines,
                 response_model_name=response_model_name,
+                on_complete=_build_session_completion_handler(request, session_context),
             ),
             media_type="text/event-stream",
             headers={
@@ -111,6 +120,12 @@ async def create_message(request: Request) -> Response:
             status_code=exc.status_code,
             content=_anthropic_error_payload(exc.status_code, exc.payload),
         )
+
+    await _store_responses_session_state(
+        request,
+        session_context=session_context,
+        upstream_response=upstream_response,
+    )
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -141,6 +156,8 @@ def _build_responses_payload_from_messages_request(
     prompt_cache_key = _extract_prompt_cache_key(raw_payload)
     if prompt_cache_key:
         payload["prompt_cache_key"] = prompt_cache_key
+        if settings.default_prompt_cache_retention:
+            payload["prompt_cache_retention"] = settings.default_prompt_cache_retention
 
     if system_text:
         payload["instructions"] = system_text
@@ -181,7 +198,218 @@ def _build_responses_payload_from_messages_request(
     if converted_tool_choice is not None:
         payload["tool_choice"] = converted_tool_choice
 
-    return resolve_openai_payload_file_ids(payload, file_store), resolved_model
+    resolved_payload = resolve_openai_payload_file_ids(payload, file_store)
+    _log_cache_diagnostics(request, raw_payload=raw_payload, payload=resolved_payload)
+    return resolved_payload, resolved_model
+
+
+async def _prepare_responses_session_reuse(
+    request: Request,
+    *,
+    raw_payload: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    session_store: ResponsesSessionStore | None = getattr(
+        request.app.state,
+        "responses_session_store",
+        None,
+    )
+    raw_logger = getattr(request.app.state, "raw_io_logger", None)
+    if session_store is None:
+        return None
+
+    session_key = _extract_prompt_cache_key(raw_payload)
+    if not session_key:
+        return None
+
+    input_items = payload.get("input")
+    if not isinstance(input_items, list) or not input_items:
+        return None
+
+    canonical_full_input = _canonicalize_json_like(input_items)
+    context = {
+        "session_key": session_key,
+        "model": _string(payload.get("model")) or "",
+        "instructions_hash": _hash_json_payload(payload.get("instructions")),
+        "tools_hash": _hash_json_payload(payload.get("tools")),
+        "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
+        "full_input": canonical_full_input,
+        "reused": False,
+    }
+
+    previous_state = await session_store.get(session_key)
+    if previous_state is None:
+        return context
+
+    if not _can_resume_responses_session(previous_state, context):
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "session_key": session_key,
+                    "reused": False,
+                    "reason": "state_mismatch",
+                    "previous_model": previous_state.model,
+                    "model": context["model"],
+                },
+            )
+        return context
+
+    previous_input = previous_state.full_input
+    if len(canonical_full_input) <= len(previous_input):
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "session_key": session_key,
+                    "reused": False,
+                    "reason": "no_appended_input",
+                    "input_count": len(canonical_full_input),
+                    "previous_input_count": len(previous_input),
+                },
+            )
+        return context
+
+    delta_input = _trim_replayed_assistant_input(
+        canonical_full_input[len(previous_input) :]
+    )
+    if not delta_input:
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "session_key": session_key,
+                    "reused": False,
+                    "reason": "empty_delta_after_trim",
+                    "input_count": len(canonical_full_input),
+                    "previous_input_count": len(previous_input),
+                },
+            )
+        return context
+
+    payload["previous_response_id"] = previous_state.response_id
+    payload["input"] = copy.deepcopy(delta_input)
+    context["reused"] = True
+    context["delta_input"] = delta_input
+    context["previous_response_id"] = previous_state.response_id
+
+    if raw_logger is not None:
+        raw_logger.log(
+            "proxy.session_reuse",
+            {
+                "session_key": session_key,
+                "reused": True,
+                "previous_response_id": previous_state.response_id,
+                "input_count": len(canonical_full_input),
+                "previous_input_count": len(previous_input),
+                "delta_input_count": len(delta_input),
+            },
+        )
+    return context
+
+
+def _can_resume_responses_session(
+    previous_state: ResponsesSessionState,
+    context: dict[str, Any],
+) -> bool:
+    if previous_state.model != context["model"]:
+        return False
+    if previous_state.instructions_hash != context["instructions_hash"]:
+        return False
+    if previous_state.tools_hash != context["tools_hash"]:
+        return False
+    if previous_state.tool_choice_hash != context["tool_choice_hash"]:
+        return False
+
+    current_input = context["full_input"]
+    previous_input = previous_state.full_input
+    if len(current_input) < len(previous_input):
+        return False
+    return current_input[: len(previous_input)] == previous_input
+
+
+def _trim_replayed_assistant_input(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    index = 0
+    while index < len(input_items):
+        item = input_items[index]
+        if not _is_assistant_originated_item(item):
+            break
+        index += 1
+    return input_items[index:]
+
+
+def _is_assistant_originated_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    item_type = _string(item.get("type")).strip().lower()
+    if item_type == "function_call":
+        return True
+    role = _string(item.get("role")).strip().lower()
+    return role == "assistant"
+
+
+def _build_session_completion_handler(
+    request: Request,
+    session_context: dict[str, Any] | None,
+):
+    if not session_context:
+        return None
+
+    async def _on_complete(response_id: str) -> None:
+        await _store_responses_session_state(
+            request,
+            session_context=session_context,
+            upstream_response={"id": response_id},
+        )
+
+    return _on_complete
+
+
+async def _store_responses_session_state(
+    request: Request,
+    *,
+    session_context: dict[str, Any] | None,
+    upstream_response: dict[str, Any],
+) -> None:
+    if not session_context:
+        return
+
+    response_id = _string(upstream_response.get("id"))
+    if not response_id:
+        return
+
+    session_store: ResponsesSessionStore | None = getattr(
+        request.app.state,
+        "responses_session_store",
+        None,
+    )
+    raw_logger = getattr(request.app.state, "raw_io_logger", None)
+    if session_store is None:
+        return
+
+    await session_store.put(
+        ResponsesSessionState(
+            session_key=session_context["session_key"],
+            response_id=response_id,
+            model=session_context["model"],
+            instructions_hash=session_context["instructions_hash"],
+            tools_hash=session_context["tools_hash"],
+            tool_choice_hash=session_context["tool_choice_hash"],
+            full_input=copy.deepcopy(session_context["full_input"]),
+            updated_at=time.time(),
+        )
+    )
+    if raw_logger is not None:
+        raw_logger.log(
+            "proxy.session_state.updated",
+            {
+                "session_key": session_context["session_key"],
+                "response_id": response_id,
+                "model": session_context["model"],
+                "input_count": len(session_context["full_input"]),
+                "reused": session_context.get("reused") is True,
+            },
+        )
 
 
 def _convert_messages_input(raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
@@ -402,7 +630,7 @@ def _should_skip_system_text_for_cache(text: str) -> bool:
 def _extract_prompt_cache_key(raw_payload: dict[str, Any]) -> str | None:
     metadata = raw_payload.get("metadata")
     if not isinstance(metadata, dict):
-        return None
+        metadata = {}
 
     for field_name in ("user_id", "session_id"):
         raw_value = metadata.get(field_name)
@@ -411,6 +639,51 @@ def _extract_prompt_cache_key(raw_payload: dict[str, Any]) -> str | None:
         normalized = _normalize_prompt_cache_identity(raw_value)
         if normalized:
             return normalized
+
+    for system_text in _iter_raw_system_texts(raw_payload.get("system")):
+        normalized = _normalize_prompt_cache_identity(system_text)
+        if normalized:
+            return normalized
+
+    billing_header = _extract_billing_header_value(raw_payload.get("system"))
+    if billing_header:
+        normalized = _normalize_prompt_cache_identity(billing_header)
+        if normalized:
+            return normalized
+    return None
+
+
+def _iter_raw_system_texts(raw_system: Any) -> list[str]:
+    if isinstance(raw_system, str):
+        stripped = raw_system.strip()
+        return [stripped] if stripped else []
+    if not isinstance(raw_system, list):
+        return []
+
+    parts: list[str] = []
+    for block in raw_system:
+        if isinstance(block, str):
+            stripped = block.strip()
+            if stripped:
+                parts.append(stripped)
+            continue
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return parts
+
+
+def _extract_billing_header_value(raw_system: Any) -> str | None:
+    for text in _iter_raw_system_texts(raw_system):
+        stripped = text.strip()
+        if not stripped.lower().startswith("x-anthropic-billing-header:"):
+            continue
+        _, _, suffix = stripped.partition(":")
+        suffix = suffix.strip()
+        if suffix:
+            return suffix
     return None
 
 
@@ -436,6 +709,8 @@ def _extract_session_id(raw_value: str) -> str | None:
             return session_id.strip()
 
     match = re.search(r'"session_id"\s*:\s*"([^"]+)"', raw_value)
+    if not match:
+        match = re.search(r"\bsession_id\b\s*[:=]\s*['\"]?([^,'\"}\s]+)", raw_value)
     if not match:
         return None
     candidate = match.group(1).strip()
@@ -609,7 +884,7 @@ def _convert_tool_result_output(raw_content: Any) -> str:
                     parts.append(text)
         if parts:
             return "".join(parts)
-    return json.dumps(raw_content, ensure_ascii=False)
+    return _json_compact(raw_content)
 
 
 def _convert_tools(raw_tools: Any) -> list[dict[str, Any]]:
@@ -633,12 +908,13 @@ def _convert_tools(raw_tools: Any) -> list[dict[str, Any]]:
         converted_tool: dict[str, Any] = {
             "type": "function",
             "name": name.strip(),
-            "parameters": parameters,
+            "parameters": _canonicalize_json_like(parameters),
         }
         description = tool.get("description")
         if isinstance(description, str) and description.strip():
             converted_tool["description"] = description.strip()
         converted.append(converted_tool)
+    converted.sort(key=lambda item: item["name"])
     return converted
 
 
@@ -752,6 +1028,7 @@ def _anthropic_sse_passthrough(
     *,
     upstream_lines: AsyncIterator[str],
     response_model_name: str,
+    on_complete=None,
 ) -> AsyncIterator[bytes]:
     async def generator() -> AsyncIterator[bytes]:
         response_id = f"msg_{uuid.uuid4().hex}"
@@ -1013,6 +1290,8 @@ def _anthropic_sse_passthrough(
                     yield chunk
                 async for chunk in emit("message_stop", {"type": "message_stop"}):
                     yield chunk
+                if on_complete is not None and isinstance(response_id, str) and response_id.strip():
+                    await on_complete(response_id)
                 return
 
         if message_started:
@@ -1027,6 +1306,8 @@ def _anthropic_sse_passthrough(
                 yield chunk
             async for chunk in emit("message_stop", {"type": "message_stop"}):
                 yield chunk
+            if on_complete is not None and isinstance(response_id, str) and response_id.strip():
+                await on_complete(response_id)
 
     return generator()
 
@@ -1129,7 +1410,57 @@ def _parse_json_object(raw_value: Any) -> dict[str, Any]:
 
 
 def _json_compact(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        _canonicalize_json_like(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _canonicalize_json_like(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonicalize_json_like(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, list):
+        return [_canonicalize_json_like(item) for item in value]
+    return value
+
+
+def _log_cache_diagnostics(request: Request, *, raw_payload: dict[str, Any], payload: dict[str, Any]) -> None:
+    raw_logger = getattr(request.app.state, "raw_io_logger", None)
+    if raw_logger is None:
+        return
+
+    input_items = payload.get("input")
+    stable_prefix_input = input_items[:-1] if isinstance(input_items, list) and len(input_items) > 1 else input_items
+    diagnostics = {
+        "path": request.url.path,
+        "prompt_cache_key": payload.get("prompt_cache_key"),
+        "prompt_cache_retention": payload.get("prompt_cache_retention"),
+        "input_count": len(input_items) if isinstance(input_items, list) else 0,
+        "tools_count": len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
+        "instructions_hash": _hash_json_payload(payload.get("instructions")),
+        "tools_hash": _hash_json_payload(payload.get("tools")),
+        "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
+        "full_input_hash": _hash_json_payload(input_items),
+        "stable_prefix_hash": _hash_json_payload(stable_prefix_input),
+        "raw_system_hash": _hash_json_payload(raw_payload.get("system")),
+        "metadata_hash": _hash_json_payload(raw_payload.get("metadata")),
+    }
+    raw_logger.log("proxy.cache_diagnostics", diagnostics)
+
+
+def _hash_json_payload(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        encoded = _json_compact(value).encode("utf-8")
+    except Exception:
+        return None
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def _as_int(value: Any) -> int:

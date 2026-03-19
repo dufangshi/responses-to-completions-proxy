@@ -17,6 +17,7 @@ from app.routes.responses import router as responses_router
 from app.services.file_store import LocalFileStore
 from app.services.raw_io_logger import RawIOLogger
 from app.services.request_context import reset_current_request_id, set_current_request_id
+from app.services.responses_session_store import ResponsesSessionStore
 from app.services.responses_client import (
     AntigravityResponsesGateway,
     OpenAIResponsesGateway,
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.raw_io_logger = raw_logger
     app.state.responses_gateway = gateway
+    app.state.responses_session_store = ResponsesSessionStore()
     app.state.file_store = LocalFileStore("data/files")
     yield
     await gateway.close()
