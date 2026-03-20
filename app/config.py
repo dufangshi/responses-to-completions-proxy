@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -160,6 +161,7 @@ class Settings:
     default_upstream_model: str
     default_reasoning_effort: str | None
     default_upstream_speed: str | None
+    default_prompt_cache_retention: str | None
     raw_io_log_enabled: bool
     raw_io_log_path: str
     raw_io_log_max_chars: int
@@ -218,6 +220,9 @@ class Settings:
             ),
             default_upstream_speed=_parse_optional_str(
                 os.getenv("DEFAULT_UPSTREAM_SPEED", "fast")
+            ),
+            default_prompt_cache_retention=_parse_optional_str(
+                os.getenv("DEFAULT_PROMPT_CACHE_RETENTION", "24h")
             ),
             raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
             raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),
