@@ -40,11 +40,12 @@ def _collect_model_ids(request: Request) -> list[str]:
     if settings.default_upstream_model:
         model_ids.append(settings.default_upstream_model)
 
-    for client_model, target_model in settings.model_map.items():
-        if client_model:
-            model_ids.append(client_model)
-        if target_model:
-            model_ids.append(target_model)
+    if settings.upstream_fallback_model:
+        model_ids.append(settings.upstream_fallback_model)
+
+    for model_id in settings.force_model_chain():
+        if model_id:
+            model_ids.append(model_id)
 
     deduped: list[str] = []
     seen: set[str] = set()
