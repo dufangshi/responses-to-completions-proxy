@@ -136,6 +136,7 @@ DEFAULT_REASONING_EFFORT=medium
 # messages 上游 -> speed=fast
 # responses 上游 -> service_tier=priority
 DEFAULT_UPSTREAM_SPEED=fast
+ENABLE_GENERIC_CHAT_SESSION_INFERENCE=true
 
 # 调试日志
 RAW_IO_LOG_ENABLED=false
@@ -159,6 +160,7 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 >   - `UPSTREAM_MODE=messages` -> 上游发送 `speed=fast`
 >   - `UPSTREAM_MODE=responses` -> 上游发送 `service_tier=priority`
 > - 留空或设为其他值时，不启用 fast 行为
+> - `ENABLE_GENERIC_CHAT_SESSION_INFERENCE=true` 时，`/v1/chat/completions` 会为无显式 session id 的下游做保守的会话推断，并尽量稳定 `prompt_cache_key` 与历史前缀；判断不了时自动回退为普通转发
 
 ### 旧 `.env` 键名迁移（从旧版本升级时）
 

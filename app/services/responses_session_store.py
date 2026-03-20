@@ -17,7 +17,10 @@ class ResponsesSessionState:
     tools_hash: str | None
     tool_choice_hash: str | None
     full_input: list[dict[str, Any]]
-    updated_at: float
+    match_input: list[dict[str, Any]] | None = None
+    source_fingerprint: str | None = None
+    root_fingerprint: str | None = None
+    updated_at: float = 0.0
 
 
 class ResponsesSessionStore:
@@ -46,3 +49,9 @@ class ResponsesSessionStore:
     async def delete(self, session_key: str) -> None:
         async with self._lock:
             self._items.pop(session_key, None)
+
+    async def list_states(self) -> list[ResponsesSessionState]:
+        async with self._lock:
+            items = list(self._items.values())
+            items.reverse()
+            return [copy.deepcopy(item) for item in items]

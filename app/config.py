@@ -162,6 +162,7 @@ class Settings:
     default_reasoning_effort: str | None
     default_upstream_speed: str | None
     default_prompt_cache_retention: str | None
+    enable_generic_chat_session_inference: bool
     raw_io_log_enabled: bool
     raw_io_log_path: str
     raw_io_log_max_chars: int
@@ -223,6 +224,10 @@ class Settings:
             ),
             default_prompt_cache_retention=_parse_optional_str(
                 os.getenv("DEFAULT_PROMPT_CACHE_RETENTION", "24h")
+            ),
+            enable_generic_chat_session_inference=_parse_bool(
+                os.getenv("ENABLE_GENERIC_CHAT_SESSION_INFERENCE", "true"),
+                default=True,
             ),
             raw_io_log_enabled=_parse_bool(os.getenv("RAW_IO_LOG_ENABLED", "")),
             raw_io_log_path=os.getenv("RAW_IO_LOG_PATH", "logs/raw_io.jsonl"),

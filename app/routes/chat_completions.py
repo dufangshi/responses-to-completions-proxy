@@ -576,16 +576,6 @@ async def _prepare_chat_responses_session_reuse(
     if session_store is None:
         return None
 
-    session_key = _extract_chat_session_key(request, completion_request)
-    if not session_key:
-        return None
-
-    payload["prompt_cache_key"] = session_key
-    settings = getattr(request.app.state, "settings", None)
-    prompt_cache_retention = getattr(settings, "default_prompt_cache_retention", None)
-    if isinstance(prompt_cache_retention, str) and prompt_cache_retention.strip():
-        payload["prompt_cache_retention"] = prompt_cache_retention.strip()
-
     input_items = payload.get("input")
     if not isinstance(input_items, list) or not input_items:
         return None
@@ -593,31 +583,78 @@ async def _prepare_chat_responses_session_reuse(
     canonical_full_input = _canonicalize_json_like(
         _normalize_chat_session_input_items(input_items)
     )
+    canonical_match_input = _canonicalize_json_like(
+        _build_chat_session_match_input(canonical_full_input)
+    )
     context = {
-        "session_key": session_key,
         "model": _string(payload.get("model")) or "",
         "instructions_hash": _hash_json_payload(payload.get("instructions")),
         "tools_hash": _hash_json_payload(payload.get("tools")),
         "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
         "full_input": canonical_full_input,
+        "match_input": canonical_match_input,
+        "source_fingerprint": _build_chat_request_source_fingerprint(request),
+        "root_fingerprint": _build_chat_session_root_fingerprint(
+            canonical_match_input,
+            payload=payload,
+        ),
         "reused": False,
     }
+
+    settings = getattr(request.app.state, "settings", None)
+    session_key, session_key_source = await _resolve_chat_session_identity(
+        request,
+        completion_request=completion_request,
+        session_store=session_store,
+        context=context,
+    )
+    if not session_key:
+        return None
+
+    context["session_key"] = session_key
+    context["session_key_source"] = session_key_source
+
+    payload["prompt_cache_key"] = session_key
+    prompt_cache_retention = getattr(settings, "default_prompt_cache_retention", None)
+    if isinstance(prompt_cache_retention, str) and prompt_cache_retention.strip():
+        payload["prompt_cache_retention"] = prompt_cache_retention.strip()
 
     previous_state = await session_store.get(session_key)
     if previous_state is None:
         return context
 
-    if _should_prefer_chat_prompt_cache_strategy(session_key):
+    if _should_prefer_chat_prompt_cache_strategy(session_key, session_key_source):
+        frozen_context = _try_freeze_chat_prompt_cache_prefix(previous_state, context)
+        if frozen_context is None:
+            if raw_logger is not None:
+                raw_logger.log(
+                    "proxy.session_reuse",
+                    {
+                        "path": request.url.path,
+                        "session_key": session_key,
+                        "session_key_source": session_key_source,
+                        "reused": False,
+                        "reason": "prompt_cache_prefix_mismatch",
+                        "input_count": len(canonical_full_input),
+                        "previous_input_count": len(previous_state.full_input),
+                    },
+                )
+            return context
+
+        payload["input"] = copy.deepcopy(frozen_context["full_input"])
+        context.update(frozen_context)
         if raw_logger is not None:
             raw_logger.log(
                 "proxy.session_reuse",
                 {
                     "path": request.url.path,
                     "session_key": session_key,
+                    "session_key_source": session_key_source,
                     "reused": False,
                     "reason": "prompt_cache_preferred",
-                    "input_count": len(canonical_full_input),
+                    "input_count": len(context["full_input"]),
                     "previous_input_count": len(previous_state.full_input),
+                    "delta_input_count": len(context.get("delta_input") or []),
                 },
             )
         return context
@@ -629,6 +666,7 @@ async def _prepare_chat_responses_session_reuse(
                 {
                     "path": request.url.path,
                     "session_key": session_key,
+                    "session_key_source": session_key_source,
                     "reused": False,
                     "reason": "state_mismatch",
                     "previous_model": previous_state.model,
@@ -638,24 +676,29 @@ async def _prepare_chat_responses_session_reuse(
         return context
 
     previous_input = previous_state.full_input
-    if len(canonical_full_input) <= len(previous_input):
+    previous_match_input = _state_match_input(previous_state)
+    current_match_input = context["match_input"]
+    if len(current_match_input) <= len(previous_match_input):
         if raw_logger is not None:
             raw_logger.log(
                 "proxy.session_reuse",
                 {
                     "path": request.url.path,
                     "session_key": session_key,
+                    "session_key_source": session_key_source,
                     "reused": False,
                     "reason": "no_appended_input",
-                    "input_count": len(canonical_full_input),
+                    "input_count": len(current_match_input),
                     "previous_input_count": len(previous_input),
                 },
             )
         return context
 
-    delta_input = _trim_replayed_assistant_input(
-        canonical_full_input[len(previous_input):]
+    delta_start_index = _skip_replayed_assistant_prefix(
+        canonical_full_input,
+        start_index=len(previous_match_input),
     )
+    delta_input = canonical_full_input[delta_start_index:]
     if not delta_input:
         if raw_logger is not None:
             raw_logger.log(
@@ -663,9 +706,10 @@ async def _prepare_chat_responses_session_reuse(
                 {
                     "path": request.url.path,
                     "session_key": session_key,
+                    "session_key_source": session_key_source,
                     "reused": False,
                     "reason": "empty_delta_after_trim",
-                    "input_count": len(canonical_full_input),
+                    "input_count": len(current_match_input),
                     "previous_input_count": len(previous_input),
                 },
             )
@@ -683,9 +727,10 @@ async def _prepare_chat_responses_session_reuse(
             {
                 "path": request.url.path,
                 "session_key": session_key,
+                "session_key_source": session_key_source,
                 "reused": True,
                 "previous_response_id": previous_state.response_id,
-                "input_count": len(canonical_full_input),
+                "input_count": len(current_match_input),
                 "previous_input_count": len(previous_input),
                 "delta_input_count": len(delta_input),
             },
@@ -743,6 +788,9 @@ async def _store_chat_responses_session_state(
             tools_hash=session_context["tools_hash"],
             tool_choice_hash=session_context["tool_choice_hash"],
             full_input=copy.deepcopy(session_context["full_input"]),
+            match_input=copy.deepcopy(session_context.get("match_input")),
+            source_fingerprint=session_context.get("source_fingerprint"),
+            root_fingerprint=session_context.get("root_fingerprint"),
             updated_at=time.time(),
         )
     )
@@ -765,30 +813,28 @@ def _can_resume_chat_responses_session(
     previous_state: ResponsesSessionState,
     context: dict[str, Any],
 ) -> bool:
-    if previous_state.model != context["model"]:
-        return False
-    if previous_state.instructions_hash != context["instructions_hash"]:
-        return False
-    if previous_state.tools_hash != context["tools_hash"]:
-        return False
-    if previous_state.tool_choice_hash != context["tool_choice_hash"]:
+    if not _is_chat_session_state_compatible(previous_state, context):
         return False
 
-    current_input = context["full_input"]
-    previous_input = previous_state.full_input
+    current_input = context["match_input"]
+    previous_input = _state_match_input(previous_state)
     if len(current_input) < len(previous_input):
         return False
     return current_input[: len(previous_input)] == previous_input
 
 
-def _trim_replayed_assistant_input(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    index = 0
+def _skip_replayed_assistant_prefix(
+    input_items: list[dict[str, Any]],
+    *,
+    start_index: int = 0,
+) -> int:
+    index = max(0, start_index)
     while index < len(input_items):
         item = input_items[index]
         if not _is_assistant_originated_item(item):
             break
         index += 1
-    return input_items[index:]
+    return index
 
 
 def _is_assistant_originated_item(item: Any) -> bool:
@@ -836,8 +882,212 @@ def _normalize_chat_user_identity(raw_value: Any) -> str | None:
     return f"nanobot:{session_id}"
 
 
-def _should_prefer_chat_prompt_cache_strategy(session_key: str) -> bool:
-    return session_key.startswith("nanobot:")
+async def _resolve_chat_session_identity(
+    request: Request,
+    *,
+    completion_request: LegacyChatCompletionRequest,
+    session_store: ResponsesSessionStore,
+    context: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    explicit_session_key = _extract_chat_session_key(request, completion_request)
+    if explicit_session_key:
+        return explicit_session_key, "explicit"
+
+    settings = getattr(request.app.state, "settings", None)
+    if not getattr(settings, "enable_generic_chat_session_inference", True):
+        return None, None
+
+    inferred_state = await _infer_generic_chat_session_state(session_store, context)
+    if inferred_state is not None:
+        return inferred_state.session_key, "inferred"
+
+    return _generate_inferred_chat_session_key(), "generated"
+
+
+def _should_prefer_chat_prompt_cache_strategy(
+    session_key: str,
+    session_key_source: str | None,
+) -> bool:
+    if session_key.startswith("nanobot:"):
+        return True
+    return session_key_source in {"inferred", "generated"}
+
+
+async def _infer_generic_chat_session_state(
+    session_store: ResponsesSessionStore,
+    context: dict[str, Any],
+) -> ResponsesSessionState | None:
+    current_match_input = context["match_input"]
+    source_fingerprint = context.get("source_fingerprint")
+    root_fingerprint = context.get("root_fingerprint")
+    best_state: ResponsesSessionState | None = None
+    best_score = -1
+
+    for state in await session_store.list_states():
+        if not _is_chat_session_state_compatible(state, context):
+            continue
+        if source_fingerprint and state.source_fingerprint and state.source_fingerprint != source_fingerprint:
+            continue
+        if root_fingerprint and state.root_fingerprint and state.root_fingerprint != root_fingerprint:
+            continue
+
+        previous_match_input = _state_match_input(state)
+        if len(current_match_input) < len(previous_match_input):
+            continue
+        if current_match_input[: len(previous_match_input)] != previous_match_input:
+            continue
+
+        current_score = len(previous_match_input)
+        if current_score > best_score:
+            best_state = state
+            best_score = current_score
+            continue
+        if current_score == best_score and best_state is not None:
+            if state.updated_at > best_state.updated_at:
+                best_state = state
+
+    return best_state
+
+
+def _is_chat_session_state_compatible(
+    previous_state: ResponsesSessionState,
+    context: dict[str, Any],
+) -> bool:
+    if previous_state.model != context["model"]:
+        return False
+    if previous_state.instructions_hash != context["instructions_hash"]:
+        return False
+    if previous_state.tools_hash != context["tools_hash"]:
+        return False
+    if previous_state.tool_choice_hash != context["tool_choice_hash"]:
+        return False
+    return True
+
+
+def _try_freeze_chat_prompt_cache_prefix(
+    previous_state: ResponsesSessionState,
+    context: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _is_chat_session_state_compatible(previous_state, context):
+        return None
+
+    previous_match_input = _state_match_input(previous_state)
+    current_match_input = context["match_input"]
+    current_full_input = context["full_input"]
+
+    if len(current_match_input) < len(previous_match_input):
+        return None
+    if current_match_input[: len(previous_match_input)] != previous_match_input:
+        return None
+
+    delta_start_index = len(previous_match_input)
+    delta_input = current_full_input[delta_start_index:]
+    delta_match_input = current_match_input[delta_start_index:]
+    if not delta_input and len(current_match_input) > len(previous_match_input):
+        return None
+
+    frozen_full_input = copy.deepcopy(previous_state.full_input) + copy.deepcopy(delta_input)
+    frozen_match_input = copy.deepcopy(previous_match_input) + copy.deepcopy(delta_match_input)
+    return {
+        "full_input": frozen_full_input,
+        "match_input": frozen_match_input,
+        "delta_input": delta_input,
+        "reused": False,
+    }
+
+
+def _generate_inferred_chat_session_key() -> str:
+    return f"chat:{uuid.uuid4().hex}"
+
+
+def _build_chat_request_source_fingerprint(request: Request) -> str | None:
+    forwarded_for = _first_header_value(request.headers.get("x-forwarded-for"))
+    real_ip = _first_header_value(request.headers.get("x-real-ip"))
+    client_host = ""
+    if request.client is not None and isinstance(request.client.host, str):
+        client_host = request.client.host.strip()
+    user_agent = _string(request.headers.get("user-agent")).strip()
+    authorization = _string(request.headers.get("authorization")).strip()
+    if authorization:
+        authorization = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:16]
+
+    fingerprint_payload = {
+        "forwarded_for": forwarded_for,
+        "real_ip": real_ip,
+        "client_host": client_host,
+        "user_agent": user_agent,
+        "authorization_hash": authorization,
+    }
+    fingerprint_hash = _hash_json_payload(fingerprint_payload)
+    if not fingerprint_hash:
+        return None
+    return f"src:{fingerprint_hash}"
+
+
+def _build_chat_session_root_fingerprint(
+    match_input: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+) -> str | None:
+    stable_prefix = _extract_chat_root_prefix(match_input)
+    root_payload = {
+        "instructions": payload.get("instructions"),
+        "tools": payload.get("tools"),
+        "tool_choice": payload.get("tool_choice"),
+        "prefix": stable_prefix,
+    }
+    digest = _hash_json_payload(root_payload)
+    if not digest:
+        return None
+    return f"root:{digest}"
+
+
+def _extract_chat_root_prefix(match_input: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stable_prefix: list[dict[str, Any]] = []
+    for item in match_input:
+        if _is_assistant_originated_item(item):
+            break
+        stable_prefix.append(item)
+        if len(stable_prefix) >= 4:
+            break
+    if stable_prefix:
+        return stable_prefix
+    return match_input[: min(len(match_input), 4)]
+
+
+def _build_chat_session_match_input(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_items: list[dict[str, Any]] = []
+    for item in input_items:
+        normalized_items.append(_normalize_chat_match_item(item))
+    return normalized_items
+
+
+def _normalize_chat_match_item(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+
+    normalized_item: dict[str, Any] = {}
+    for key, value in item.items():
+        if key == "call_id":
+            continue
+        if key == "content" and isinstance(value, list):
+            normalized_item[key] = [_normalize_chat_match_item(part) for part in value]
+            continue
+        normalized_item[key] = _normalize_chat_match_item(value)
+    return normalized_item
+
+
+def _state_match_input(state: ResponsesSessionState) -> list[dict[str, Any]]:
+    if isinstance(state.match_input, list) and state.match_input:
+        return state.match_input
+    return _canonicalize_json_like(_build_chat_session_match_input(state.full_input))
+
+
+def _first_header_value(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    head, _, _ = value.partition(",")
+    return head.strip()
 
 
 def _normalize_chat_session_input_items(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
