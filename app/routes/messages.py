@@ -153,6 +153,71 @@ async def create_message(request: Request) -> Response:
     )
 
 
+@router.post("/v1/messages/count_tokens")
+@router.post("/messages/count_tokens")
+async def count_message_tokens(request: Request) -> Response:
+    gateway: BaseResponsesGateway = request.app.state.responses_gateway
+    settings = request.app.state.settings
+
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "Request body must be valid JSON object.",
+        )
+
+    if not isinstance(raw_payload, dict):
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "Request body must be a JSON object.",
+        )
+
+    if settings.upstream_mode == "messages":
+        native_payload = _prepare_native_message_request(raw_payload, request)
+        native_payload.pop("stream", None)
+        native_payload["max_tokens"] = 1
+
+        try:
+            upstream_response = await gateway.create_native_message(native_payload)
+        except UpstreamAPIError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=_anthropic_error_payload(exc.status_code, exc.payload),
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"input_tokens": _extract_anthropic_input_tokens(upstream_response)},
+        )
+
+    try:
+        payload, _ = _build_responses_payload_from_messages_request(
+            raw_payload,
+            request,
+        )
+    except ValueError as exc:
+        return _error_response(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    payload.pop("stream", None)
+    payload["store"] = False
+    payload["max_output_tokens"] = 1
+
+    try:
+        upstream_response = await gateway.create_response(payload)
+    except UpstreamAPIError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_anthropic_error_payload(exc.status_code, exc.payload),
+        )
+
+    usage = upstream_response.get("usage") if isinstance(upstream_response.get("usage"), dict) else {}
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"input_tokens": _as_int(usage.get("input_tokens"))},
+    )
+
+
 def _build_responses_payload_from_messages_request(
     raw_payload: dict[str, Any],
     request: Request,
@@ -1447,6 +1512,13 @@ def _anthropic_usage_from_openai_usage(usage: dict[str, Any]) -> dict[str, int]:
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": cached_tokens,
     }
+
+
+def _extract_anthropic_input_tokens(upstream_response: dict[str, Any]) -> int:
+    usage = upstream_response.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    return _as_int(usage.get("input_tokens"))
 
 
 async def _raw_sse_passthrough(upstream_lines: AsyncIterator[str]) -> AsyncIterator[bytes]:
