@@ -15,6 +15,13 @@ from app.models.legacy_chat_completions import LegacyChatCompletionRequest
 from app.services.file_store import resolve_openai_payload_file_ids
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 from app.services.responses_session_store import ResponsesSessionState, ResponsesSessionStore
+from app.services.session_reuse_fallback import (
+    build_session_reuse_fallback_payload,
+    build_stateless_tool_delta_input,
+    log_session_reuse_fallback,
+    mark_session_reuse_fallback_used,
+    should_retry_session_reuse,
+)
 from app.services.streaming_adapter import (
     chat_stream_chunk,
     chat_stream_usage_chunk,
@@ -205,7 +212,12 @@ async def create_chat_completion(
             )
 
         try:
-            upstream_lines = await gateway.stream_response(payload)
+            upstream_lines = await _stream_chat_response_with_session_reuse_fallback(
+                request,
+                gateway=gateway,
+                payload=payload,
+                session_context=session_context,
+            )
         except UpstreamAPIError as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
@@ -539,7 +551,14 @@ async def create_chat_completion(
     upstream_results = []
     for _ in range(completion_request.n):
         try:
-            upstream_results.append(await gateway.create_response(payload))
+            upstream_results.append(
+                await _create_chat_response_with_session_reuse_fallback(
+                    request,
+                    gateway=gateway,
+                    payload=payload,
+                    session_context=session_context,
+                )
+            )
         except UpstreamAPIError as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
@@ -556,6 +575,72 @@ async def create_chat_completion(
         response_model_name=resolved_model,
     )
     return JSONResponse(status_code=status.HTTP_200_OK, content=response_body.model_dump())
+
+
+async def _create_chat_response_with_session_reuse_fallback(
+    request: Request,
+    *,
+    gateway: BaseResponsesGateway,
+    payload: dict[str, Any],
+    session_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        return await gateway.create_response(payload)
+    except UpstreamAPIError as exc:
+        if not should_retry_session_reuse(
+            exc,
+            session_context=session_context,
+            payload=payload,
+        ):
+            raise
+
+        fallback_payload = build_session_reuse_fallback_payload(
+            payload,
+            session_context=session_context,
+        )
+        if fallback_payload is None:
+            raise
+
+        log_session_reuse_fallback(
+            request,
+            session_context=session_context,
+            exc=exc,
+        )
+        mark_session_reuse_fallback_used(session_context)
+        return await gateway.create_response(fallback_payload)
+
+
+async def _stream_chat_response_with_session_reuse_fallback(
+    request: Request,
+    *,
+    gateway: BaseResponsesGateway,
+    payload: dict[str, Any],
+    session_context: dict[str, Any] | None,
+):
+    try:
+        return await gateway.stream_response(payload)
+    except UpstreamAPIError as exc:
+        if not should_retry_session_reuse(
+            exc,
+            session_context=session_context,
+            payload=payload,
+        ):
+            raise
+
+        fallback_payload = build_session_reuse_fallback_payload(
+            payload,
+            session_context=session_context,
+        )
+        if fallback_payload is None:
+            raise
+
+        log_session_reuse_fallback(
+            request,
+            session_context=session_context,
+            exc=exc,
+        )
+        mark_session_reuse_fallback_used(session_context)
+        return await gateway.stream_response(fallback_payload)
 
 
 async def _prepare_chat_responses_session_reuse(
@@ -690,6 +775,32 @@ async def _prepare_chat_responses_session_reuse(
                     "reason": "no_appended_input",
                     "input_count": len(current_match_input),
                     "previous_input_count": len(previous_input),
+                },
+            )
+        return context
+
+    appended_input = canonical_full_input[len(previous_input) :]
+    stateless_tool_delta = build_stateless_tool_delta_input(
+        previous_input=previous_input,
+        appended_input=appended_input,
+    )
+    if stateless_tool_delta is not None:
+        payload["input"] = copy.deepcopy(stateless_tool_delta)
+        payload.pop("previous_response_id", None)
+        context["delta_input"] = stateless_tool_delta
+        context["session_reuse_mode"] = "tool_delta_stateless"
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "path": request.url.path,
+                    "session_key": session_key,
+                    "session_key_source": session_key_source,
+                    "reused": False,
+                    "reason": "tool_delta_stateless",
+                    "input_count": len(current_match_input),
+                    "previous_input_count": len(previous_input),
+                    "delta_input_count": len(stateless_tool_delta),
                 },
             )
         return context
