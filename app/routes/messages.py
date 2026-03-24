@@ -383,6 +383,7 @@ async def _prepare_responses_session_reuse(
         "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
         "full_input": canonical_full_input,
         "reused": False,
+        "store_session_state": True,
     }
 
     previous_state = await session_store.get(session_key)
@@ -390,6 +391,7 @@ async def _prepare_responses_session_reuse(
         return context
 
     if not _can_resume_responses_session(previous_state, context):
+        context["store_session_state"] = False
         if raw_logger is not None:
             raw_logger.log(
                 "proxy.session_reuse",
@@ -542,6 +544,19 @@ async def _store_responses_session_state(
     upstream_response: dict[str, Any],
 ) -> None:
     if not session_context:
+        return
+
+    if session_context.get("store_session_state") is False:
+        raw_logger = getattr(request.app.state, "raw_io_logger", None)
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_state.skipped",
+                {
+                    "path": request.url.path,
+                    "session_key": session_context.get("session_key"),
+                    "reason": "state_mismatch_branch",
+                },
+            )
         return
 
     response_id = _string(upstream_response.get("id"))

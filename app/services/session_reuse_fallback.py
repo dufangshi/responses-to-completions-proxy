@@ -8,6 +8,10 @@ from fastapi import Request
 from app.services.responses_client import UpstreamAPIError
 
 _SESSION_REUSE_FALLBACK_STATUS_CODES = {500, 502, 503, 504}
+_MISSING_TOOL_CALL_ERROR_SNIPPETS = (
+    "No tool call found for function call output",
+    "No function call found for function call output",
+)
 
 
 def build_stateless_tool_delta_input(
@@ -25,11 +29,11 @@ def build_stateless_tool_delta_input(
             break
         prefix_length += 1
 
-    if prefix_length == 0 or prefix_length >= len(appended_input):
+    if prefix_length >= len(appended_input):
         return None
 
     assistant_prefix = appended_input[:prefix_length]
-    if not all(_item_type(item) == "function_call" for item in assistant_prefix):
+    if assistant_prefix and not all(_item_type(item) == "function_call" for item in assistant_prefix):
         return None
 
     first_user_item = appended_input[prefix_length]
@@ -44,7 +48,10 @@ def build_stateless_tool_delta_input(
         replay_start = _find_stateless_tool_replay_start(previous_input)
         context_prefix = copy.deepcopy(previous_input[replay_start:])
 
-    return context_prefix + copy.deepcopy(appended_input)
+    replay_input = context_prefix + copy.deepcopy(appended_input)
+    if not _can_replay_tool_outputs(replay_input):
+        return None
+    return replay_input
 
 
 def build_session_reuse_fallback_payload(
@@ -75,7 +82,7 @@ def should_retry_session_reuse(
     session_context: dict[str, Any] | None,
     payload: dict[str, Any],
 ) -> bool:
-    if exc.status_code not in _SESSION_REUSE_FALLBACK_STATUS_CODES:
+    if not _is_retryable_session_reuse_error(exc):
         return False
     return build_session_reuse_fallback_payload(
         payload,
@@ -142,6 +149,52 @@ def _find_stateless_tool_replay_start(previous_input: list[dict[str, Any]]) -> i
 def _is_tool_item(item: Any) -> bool:
     item_type = _item_type(item)
     return item_type in {"function_call", "function_call_output"}
+
+
+def _can_replay_tool_outputs(input_items: list[dict[str, Any]]) -> bool:
+    seen_function_calls: set[str] = set()
+    saw_function_call_output = False
+
+    for item in input_items:
+        item_type = _item_type(item)
+        call_id = _string(item.get("call_id")).strip()
+        if item_type == "function_call":
+            if call_id:
+                seen_function_calls.add(call_id)
+            continue
+        if item_type != "function_call_output":
+            continue
+        saw_function_call_output = True
+        if not call_id or call_id not in seen_function_calls:
+            return False
+
+    return saw_function_call_output
+
+
+def _is_retryable_session_reuse_error(exc: UpstreamAPIError) -> bool:
+    if exc.status_code in _SESSION_REUSE_FALLBACK_STATUS_CODES:
+        return True
+    if exc.status_code != 400:
+        return False
+    message = _extract_upstream_error_message(exc.payload)
+    if not message:
+        return False
+    return any(snippet in message for snippet in _MISSING_TOOL_CALL_ERROR_SNIPPETS)
+
+
+def _extract_upstream_error_message(payload: Any) -> str:
+    if isinstance(payload, dict):
+        error_obj = payload.get("error")
+        if isinstance(error_obj, dict):
+            message = error_obj.get("message")
+            if isinstance(message, str):
+                return message
+        message = payload.get("message")
+        if isinstance(message, str):
+            return message
+    if isinstance(payload, str):
+        return payload
+    return ""
 
 
 def _string(value: Any) -> str:
