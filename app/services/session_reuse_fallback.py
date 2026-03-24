@@ -32,10 +32,6 @@ def build_stateless_tool_delta_input(
     if prefix_length >= len(appended_input):
         return None
 
-    assistant_prefix = appended_input[:prefix_length]
-    if assistant_prefix and not all(_item_type(item) == "function_call" for item in assistant_prefix):
-        return None
-
     first_user_item = appended_input[prefix_length]
     if _item_type(first_user_item) != "function_call_output":
         return None
@@ -52,6 +48,14 @@ def build_stateless_tool_delta_input(
     if not _can_replay_tool_outputs(replay_input):
         return None
     return replay_input
+
+
+def should_force_full_input_replay(delta_input: list[dict[str, Any]] | Any) -> bool:
+    if not isinstance(delta_input, list) or not delta_input:
+        return False
+    if _item_type(delta_input[0]) != "function_call_output":
+        return False
+    return not _can_replay_tool_outputs(delta_input)
 
 
 def build_session_reuse_fallback_payload(

@@ -20,6 +20,7 @@ from app.services.session_reuse_fallback import (
     build_stateless_tool_delta_input,
     log_session_reuse_fallback,
     mark_session_reuse_fallback_used,
+    should_force_full_input_replay,
     should_retry_session_reuse,
 )
 from app.services.streaming_adapter import (
@@ -828,6 +829,27 @@ async def _prepare_chat_responses_session_reuse(
             )
         return context
 
+    if should_force_full_input_replay(delta_input):
+        payload.pop("previous_response_id", None)
+        payload["input"] = copy.deepcopy(canonical_full_input)
+        context["delta_input"] = copy.deepcopy(canonical_full_input)
+        context["session_reuse_mode"] = "tool_output_full_replay"
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "path": request.url.path,
+                    "session_key": session_key,
+                    "session_key_source": session_key_source,
+                    "reused": False,
+                    "reason": "tool_output_full_replay",
+                    "input_count": len(current_match_input),
+                    "previous_input_count": len(previous_input),
+                    "delta_input_count": len(canonical_full_input),
+                },
+            )
+        return context
+
     payload["previous_response_id"] = previous_state.response_id
     payload["input"] = copy.deepcopy(delta_input)
     context["reused"] = True
@@ -1085,8 +1107,6 @@ def _is_chat_session_state_compatible(
         return False
     if previous_state.tools_hash != context["tools_hash"]:
         return False
-    if previous_state.tool_choice_hash != context["tool_choice_hash"]:
-        return False
     return True
 
 
@@ -1159,7 +1179,6 @@ def _build_chat_session_root_fingerprint(
     root_payload = {
         "instructions": payload.get("instructions"),
         "tools": payload.get("tools"),
-        "tool_choice": payload.get("tool_choice"),
         "prefix": stable_prefix,
     }
     digest = _hash_json_payload(root_payload)

@@ -20,6 +20,7 @@ from app.services.session_reuse_fallback import (
     build_stateless_tool_delta_input,
     log_session_reuse_fallback,
     mark_session_reuse_fallback_used,
+    should_force_full_input_replay,
     should_retry_session_reuse,
 )
 from app.services.streaming_adapter import iter_upstream_sse_events
@@ -455,6 +456,25 @@ async def _prepare_responses_session_reuse(
                     "reason": "empty_delta_after_trim",
                     "input_count": len(canonical_full_input),
                     "previous_input_count": len(previous_input),
+                },
+            )
+        return context
+
+    if should_force_full_input_replay(delta_input):
+        payload.pop("previous_response_id", None)
+        payload["input"] = copy.deepcopy(canonical_full_input)
+        context["delta_input"] = copy.deepcopy(canonical_full_input)
+        context["session_reuse_mode"] = "tool_output_full_replay"
+        if raw_logger is not None:
+            raw_logger.log(
+                "proxy.session_reuse",
+                {
+                    "session_key": session_key,
+                    "reused": False,
+                    "reason": "tool_output_full_replay",
+                    "input_count": len(canonical_full_input),
+                    "previous_input_count": len(previous_input),
+                    "delta_input_count": len(canonical_full_input),
                 },
             )
         return context
