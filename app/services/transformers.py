@@ -471,7 +471,10 @@ def apply_stop_sequences(
 
 def _validate_supported_params(request: LegacyCompletionRequest) -> None:
     for field_name in UNSUPPORTED_FIELDS:
-        if getattr(request, field_name) is not None:
+        value = getattr(request, field_name)
+        if value is not None and not _is_effectively_ignored_unsupported_value(
+            field_name, value
+        ):
             raise UnsupportedParameterError(
                 f"'{field_name}' is not supported by this compatibility proxy."
             )
@@ -479,10 +482,35 @@ def _validate_supported_params(request: LegacyCompletionRequest) -> None:
 
 def _validate_supported_chat_params(request: LegacyChatCompletionRequest) -> None:
     for field_name in UNSUPPORTED_CHAT_FIELDS:
-        if getattr(request, field_name) is not None:
+        value = getattr(request, field_name)
+        if value is not None and not _is_effectively_ignored_unsupported_value(
+            field_name, value
+        ):
             raise UnsupportedParameterError(
                 f"'{field_name}' is not supported by this compatibility proxy."
             )
+
+
+def _is_effectively_ignored_unsupported_value(field_name: str, value: Any) -> bool:
+    if field_name in {"frequency_penalty", "presence_penalty"}:
+        return isinstance(value, (int, float)) and float(value) == 0.0
+
+    if field_name == "logit_bias":
+        return isinstance(value, dict) and not value
+
+    if field_name == "response_format":
+        if isinstance(value, dict):
+            response_type = value.get("type")
+            return not value or response_type in {None, "text"}
+        return False
+
+    if field_name == "best_of":
+        return isinstance(value, int) and value == 1
+
+    if field_name == "suffix":
+        return isinstance(value, str) and not value
+
+    return False
 
 
 def _build_shared_sampling_params(
