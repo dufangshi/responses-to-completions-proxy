@@ -146,6 +146,23 @@
       justify-content: center;
     }
   }
+
+  .chat-input-action-expanded {
+    width: var(--full-width);
+
+    .text {
+      opacity: 1;
+      transform: translate(0);
+    }
+
+    &:hover {
+      transition-delay: 0s;
+
+      .text {
+        transition-delay: 0s;
+      }
+    }
+  }
 }
 
 .prompt-toast {

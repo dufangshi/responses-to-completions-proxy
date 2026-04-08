@@ -13,6 +13,10 @@ const PDF_EXTENSION = ".pdf";
 const TEXT_EXTENSION = ".txt";
 const INVALID_FILENAME_CHARS = /[\\/\0\r\n\t"]/g;
 const COLLAPSE_SPACES = /\s+/g;
+const LEADING_DOTS = /^\.+/;
+const TRAILING_DOTS_AND_SPACES = /[.\s]+$/;
+const INVALID_EXTENSION_CHARS = /[^.a-zA-Z0-9_-]/g;
+const MAX_BASENAME_LENGTH = 64;
 
 export function isSupportedChatAttachmentFile(file: File) {
   const lowerName = file.name.toLowerCase();
@@ -38,7 +42,27 @@ export function normalizeAttachmentFilename(rawFilename: string, file: Blob) {
     .replace(COLLAPSE_SPACES, " ")
     .trim();
 
-  return sanitized || fallbackName;
+  const resolvedName = sanitized || fallbackName;
+  const fallbackExtension = fallbackName.includes(".")
+    ? fallbackName.slice(fallbackName.lastIndexOf("."))
+    : "";
+  const lastDotIndex = resolvedName.lastIndexOf(".");
+  const rawBaseName =
+    lastDotIndex > 0 ? resolvedName.slice(0, lastDotIndex) : resolvedName;
+  const rawExtension = lastDotIndex > 0 ? resolvedName.slice(lastDotIndex) : "";
+
+  const baseName =
+    rawBaseName
+      .replace(LEADING_DOTS, "")
+      .replace(TRAILING_DOTS_AND_SPACES, "")
+      .trim()
+      .slice(0, MAX_BASENAME_LENGTH) || "document";
+  const extension =
+    rawExtension.replace(INVALID_EXTENSION_CHARS, "").trim() ||
+    fallbackExtension;
+  const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  return `${baseName}-${uniqueSuffix}${extension}`;
 }
 
 function getBearerToken(apiKey: string) {

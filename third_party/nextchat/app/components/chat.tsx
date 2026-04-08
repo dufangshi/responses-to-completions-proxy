@@ -70,6 +70,7 @@ import {
   getMessageImages,
   getMessageTextContent,
   isDalle3,
+  isOpenAICompatibleProviderName,
   isVisionModel,
   safeLocalStorage,
   getModelSizes,
@@ -85,7 +86,6 @@ import {
 import {
   deleteOpenAIFile,
   isSupportedChatAttachmentFile,
-  normalizeAttachmentFilename,
   uploadOpenAIFile,
 } from "@/app/utils/openai-files";
 
@@ -419,6 +419,7 @@ export function ChatAction(props: {
   text: string;
   icon: JSX.Element;
   onClick: () => void;
+  alwaysExpanded?: boolean;
 }) {
   const iconRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
@@ -438,15 +439,24 @@ export function ChatAction(props: {
     });
   }
 
+  useEffect(() => {
+    updateWidth();
+  }, [props.text]);
+
   return (
     <div
-      className={clsx(styles["chat-input-action"], "clickable")}
+      className={clsx(
+        styles["chat-input-action"],
+        props.alwaysExpanded && styles["chat-input-action-expanded"],
+        "clickable",
+      )}
       onClick={() => {
         props.onClick();
         setTimeout(updateWidth, 1);
       }}
       onMouseEnter={updateWidth}
       onTouchStart={updateWidth}
+      title={props.text}
       style={
         {
           "--icon-width": `${width.icon}px`,
@@ -595,7 +605,8 @@ export function ChatActions(props: {
     }
 
     const supportsFiles =
-      currentProviderName === ServiceProvider.OpenAI && !isDalle3(currentModel);
+      isOpenAICompatibleProviderName(currentProviderName) &&
+      !isDalle3(currentModel);
     setShowUploadFiles(supportsFiles);
     if (!supportsFiles) {
       props.setAttachFiles([]);
@@ -650,6 +661,7 @@ export function ChatActions(props: {
             onClick={props.uploadImage}
             text={Locale.Chat.InputActions.UploadImage}
             icon={props.uploading ? <LoadingButtonIcon /> : <ImageIcon />}
+            alwaysExpanded
           />
         )}
         {showUploadFiles && (
@@ -657,6 +669,7 @@ export function ChatActions(props: {
             onClick={props.uploadFiles}
             text={Locale.Chat.InputActions.UploadFile}
             icon={props.uploading ? <LoadingButtonIcon /> : <UploadIcon />}
+            alwaysExpanded
           />
         )}
         <ChatAction
@@ -1071,7 +1084,8 @@ function _Chat() {
     session.mask.modelConfig?.providerName || ServiceProvider.OpenAI;
   const supportsImageAttachments = isVisionModel(currentModel);
   const supportsFileAttachments =
-    currentProviderName === ServiceProvider.OpenAI && !isDalle3(currentModel);
+    isOpenAICompatibleProviderName(currentProviderName) &&
+    !isDalle3(currentModel);
   const MAX_ATTACH_IMAGES = 3;
   const MAX_ATTACH_FILES = 3;
 
@@ -1641,13 +1655,7 @@ function _Chat() {
         const [uploadedImages, uploadedFiles] = await Promise.all([
           Promise.all(imageFiles.map((file) => uploadImageRemote(file))),
           Promise.all(
-            documentFiles.map((file) =>
-              uploadOpenAIFile(
-                new File([file], normalizeAttachmentFilename(file.name, file), {
-                  type: file.type,
-                }),
-              ),
-            ),
+            documentFiles.map((file) => uploadOpenAIFile(file)),
           ),
         ]);
         appendImageAttachments(uploadedImages);

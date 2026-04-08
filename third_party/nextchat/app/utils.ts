@@ -217,6 +217,21 @@ export function autoGrowTextArea(dom: HTMLTextAreaElement) {
   return rows;
 }
 
+export function isOpenAICompatibleProviderName(providerName?: string | null) {
+  if (!providerName || providerName.trim().length === 0) {
+    return true;
+  }
+
+  const normalizedProvider = providerName.trim().toLowerCase();
+  if (normalizedProvider === ServiceProvider.OpenAI.toLowerCase()) {
+    return true;
+  }
+
+  return !Object.values(ServiceProvider).some(
+    (value) => value.toLowerCase() === normalizedProvider,
+  );
+}
+
 export function getCSSVar(varName: string) {
   return getComputedStyle(document.body).getPropertyValue(varName).trim();
 }
