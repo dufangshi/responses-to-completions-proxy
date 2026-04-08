@@ -16,3 +16,36 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18010/healthz').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  nextchat-web:
+    build:
+      context: ./third_party/nextchat
+      dockerfile: Dockerfile
+    image: oai-api-nextchat:latest
+    container_name: nextchat-web
+    restart: unless-stopped
+    depends_on:
+      completions-proxy:
+        condition: service_healthy
+    environment:
+      OPENAI_API_KEY: test-local
+      BASE_URL: http://completions-proxy:18010
+      HIDE_USER_API_KEY: "1"
+      DISABLE_FAST_LINK: "1"
+      CUSTOM_MODELS: -all,+${DEFAULT_UPSTREAM_MODEL}
+      DEFAULT_MODEL: ${DEFAULT_UPSTREAM_MODEL}
+      CODE: ${WEB_CODE:-}
+    ports:
+      - "${WEB_PORT:-38080}:3000"

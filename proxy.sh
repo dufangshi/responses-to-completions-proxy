@@ -5,10 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
-SERVICE_NAME="completions-proxy"
+PROXY_SERVICE_NAME="completions-proxy"
+WEB_SERVICE_NAME="nextchat-web"
 
 DEFAULT_APP_HOST="127.0.0.1"
 DEFAULT_APP_PORT="18010"
+DEFAULT_WEB_PORT="38080"
+DEFAULT_WEB_CODE=""
 DEFAULT_UPSTREAM_BASE_URL="https://sub.lnz-study.com"
 DEFAULT_UPSTREAM_MODE="responses"
 DEFAULT_UPSTREAM_STREAMING_ENABLED="true"
@@ -167,6 +170,8 @@ write_env_file() {
   cat >"$tmp_file" <<EOF
 APP_HOST=$APP_HOST
 APP_PORT=$APP_PORT
+WEB_PORT=$WEB_PORT
+WEB_CODE=$WEB_CODE
 UPSTREAM_BASE_URL=$UPSTREAM_BASE_URL
 UPSTREAM_MODE=$UPSTREAM_MODE
 UPSTREAM_STREAMING_ENABLED=$UPSTREAM_STREAMING_ENABLED
@@ -206,6 +211,8 @@ collect_config() {
 
   APP_HOST="$(current_or_default APP_HOST "$DEFAULT_APP_HOST")"
   APP_PORT="$(current_or_default APP_PORT "$DEFAULT_APP_PORT")"
+  WEB_PORT="$(prompt_text "Web UI port" "$(current_or_default WEB_PORT "$DEFAULT_WEB_PORT")")"
+  WEB_CODE="$(current_or_default WEB_CODE "$DEFAULT_WEB_CODE")"
   UPSTREAM_BASE_URL="$(prompt_text "Upstream base URL" "$(current_or_default UPSTREAM_BASE_URL "$DEFAULT_UPSTREAM_BASE_URL")")"
   UPSTREAM_MODE="$(prompt_text "Upstream mode (responses/messages)" "$(current_or_default UPSTREAM_MODE "$DEFAULT_UPSTREAM_MODE")")"
   UPSTREAM_API_KEY="$(prompt_secret "Upstream API key" "$(current_or_default UPSTREAM_API_KEY "")")"
@@ -227,6 +234,7 @@ collect_config() {
 
   validate_required "APP_HOST" "$APP_HOST"
   validate_required "APP_PORT" "$APP_PORT"
+  validate_required "WEB_PORT" "$WEB_PORT"
   validate_required "UPSTREAM_BASE_URL" "$UPSTREAM_BASE_URL"
   validate_required "UPSTREAM_MODE" "$UPSTREAM_MODE"
   validate_required "UPSTREAM_API_KEY" "$UPSTREAM_API_KEY"
@@ -254,20 +262,24 @@ wait_for_health() {
 docker_up() {
   require_prerequisites
   [ -f "$ENV_FILE" ] || die "Missing $ENV_FILE. Run './proxy.sh setup' first."
-  info "Recreating $SERVICE_NAME"
-  compose rm -sf "$SERVICE_NAME" >/dev/null 2>&1 || true
-  compose up -d --build "$SERVICE_NAME"
+  info "Recreating $PROXY_SERVICE_NAME and $WEB_SERVICE_NAME"
+  compose rm -sf "$PROXY_SERVICE_NAME" "$WEB_SERVICE_NAME" >/dev/null 2>&1 || true
+  compose up -d --build "$PROXY_SERVICE_NAME" "$WEB_SERVICE_NAME"
   wait_for_health || true
+  local web_port
+  web_port="$(current_or_default WEB_PORT "$DEFAULT_WEB_PORT")"
+  info "Proxy: http://127.0.0.1:$(current_or_default APP_PORT "$DEFAULT_APP_PORT")"
+  info "Web UI: http://127.0.0.1:${web_port}"
 }
 
 docker_down() {
   require_prerequisites
-  compose stop "$SERVICE_NAME" || true
+  compose stop "$PROXY_SERVICE_NAME" "$WEB_SERVICE_NAME" || true
 }
 
 docker_logs() {
   require_prerequisites
-  compose logs -f "$SERVICE_NAME"
+  compose logs -f "$PROXY_SERVICE_NAME" "$WEB_SERVICE_NAME"
 }
 
 docker_status() {
@@ -314,13 +326,13 @@ run_update() {
 show_help() {
   cat <<'EOF'
 Usage:
-  ./proxy.sh setup    # ask only base URL / API key / upstream mode / default model, then start
-  ./proxy.sh config   # same minimal reconfigure flow, then recreate the container
-  ./proxy.sh up       # recreate/start the container using the current .env
-  ./proxy.sh down     # stop the container
-  ./proxy.sh logs     # tail container logs
+  ./proxy.sh setup    # ask only web port / base URL / API key / upstream mode / default model, then start
+  ./proxy.sh config   # same minimal reconfigure flow, then recreate the containers
+  ./proxy.sh up       # recreate/start the proxy and web ui using the current .env
+  ./proxy.sh down     # stop the proxy and web ui
+  ./proxy.sh logs     # tail proxy and web ui logs
   ./proxy.sh status   # show compose status and health check
-  ./proxy.sh update   # try git pull (if safe), then recreate the container
+  ./proxy.sh update   # try git pull (if safe), then recreate the containers
   ./proxy.sh help
 EOF
 }

@@ -16,6 +16,13 @@
 
 当前版本只支持单一上游。
 
+现在仓库还内置了一个网页版聊天前端：
+- Web UI：基于 `NextChat`
+- 默认通过 Docker Compose 与 proxy 一起启动
+- Web UI 只走本地 proxy，不直连真实上游
+- Web UI 默认只展示一个模型，名称与 `DEFAULT_UPSTREAM_MODEL` 一致
+- 即使前端请求里带了 `model`，proxy 仍会忽略并使用自己的默认模型
+
 代理对外同时兼容：
 - OpenAI SDK / Responses API
 - OpenAI Chat Completions API
@@ -48,7 +55,8 @@
 - `config`：重新输入配置，自动备份旧 `.env`，然后重建容器
 - `update`：在工作区干净时自动 `git pull --rebase --autostash`，然后重建容器
 
-`setup` / `config` 现在默认只问 4 个问题：
+`setup` / `config` 现在默认只问 5 个问题：
+- Web UI 端口 `WEB_PORT`
 - 上游 `Base URL`
 - 上游 `API Key`
 - 上游模式：`responses` 或 `messages`
@@ -66,6 +74,8 @@ chmod +x ./proxy.sh
 ```
 
 服务默认地址：`http://127.0.0.1:18010`
+
+Web UI 默认地址：`http://127.0.0.1:38080`
 
 ---
 
@@ -116,6 +126,8 @@ DEFAULT_UPSTREAM_MODEL=gpt-5.4
 ```env
 APP_HOST=127.0.0.1
 APP_PORT=18010
+WEB_PORT=38080
+WEB_CODE=
 UPSTREAM_MESSAGES_API_VERSION=2023-06-01
 UPSTREAM_TIMEOUT_SECONDS=120
 UPSTREAM_STREAMING_ENABLED=true
@@ -146,6 +158,8 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 ```
 
 > 说明：
+> - `WEB_PORT` 是内置聊天网页的对外端口
+> - `WEB_CODE` 留空表示 Web UI 不启用访问码；填写后会启用 NextChat 自带的访问码页
 > - `UPSTREAM_BASE_URL` 可以写根域名，也可以直接写到 `/v1`
 > - 代理内部会统一规范到 `/v1`
 > - `UPSTREAM_MODE=messages` 时，请求会发到 `/v1/messages`
@@ -155,6 +169,8 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 > - 实际使用的模型、推理强度、fast 模式统一由 `.env` 控制
 > - 默认模型是 `gpt-5.4`
 > - 默认推理强度是 `medium`
+> - Web UI 默认调用 `POST /v1/chat/completions`
+> - Web UI 会隐藏用户自定义 API Key 输入，并把可选模型列表压缩为单一 `DEFAULT_UPSTREAM_MODEL`
 > - `DEFAULT_UPSTREAM_SPEED` 是统一的 fast 开关
 > - 设为 `fast` 时：
 >   - `UPSTREAM_MODE=messages` -> 上游发送 `speed=fast`
@@ -211,6 +227,34 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 - `GET /v1/models/{model_id}`
 
 所有主要 POST 入口都支持 `stream: true`。
+
+---
+
+## 内置 Web UI
+
+项目自带一个 `NextChat` 前端快照，源码位于 `third_party/nextchat`。
+
+默认部署方式：
+- `completions-proxy`：`18010`
+- `nextchat-web`：`38080`
+
+启动后你可以直接访问：
+- Proxy API：`http://127.0.0.1:18010/v1`
+- Chat Web UI：`http://127.0.0.1:38080`
+
+前端接入方式：
+- Web UI 内部通过 Docker 网络访问 `http://completions-proxy:18010`
+- 前端请求走 `POST /v1/chat/completions`
+- 前端页面默认隐藏用户自定义 API Key 输入
+- 前端模型列表默认只显示一个模型：`DEFAULT_UPSTREAM_MODEL`
+
+如果你设置了：
+
+```env
+WEB_CODE=your-password
+```
+
+那么打开 Web UI 时会先进入访问码页。
 
 ## 四个主要入口分别做什么
 
@@ -431,13 +475,17 @@ curl -sS http://127.0.0.1:18010/v1/messages \
 
 ### docker compose
 
+会同时启动 proxy 和内置 Web UI：
+
 ```bash
-docker rm -f completions-proxy 2>/dev/null || true
-docker compose rm -sf completions-proxy
-docker compose up -d --build completions-proxy
+docker rm -f completions-proxy nextchat-web 2>/dev/null || true
+docker compose rm -sf completions-proxy nextchat-web
+docker compose up -d --build completions-proxy nextchat-web
 ```
 
 ### docker run
+
+如果你只手动跑 proxy，可以继续这样：
 
 ```bash
 docker pull ghcr.io/dufangshi/responses-to-completions-proxy:latest
@@ -456,6 +504,7 @@ docker run -d --name completions-proxy \
 补充：
 - `./data` 用来持久化 `/v1/files` 上传的本地文件
 - 如果你删掉这个目录，之前返回过的 `file_id` 就会失效
+- 如果你也要手动跑 Web UI，推荐直接使用 `docker compose`，因为前端需要和 proxy 处于同一个 Docker 网络中
 
 ---
 
