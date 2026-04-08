@@ -13,6 +13,8 @@ services:
       APP_PORT: 18010
     ports:
       - "18010:18010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data

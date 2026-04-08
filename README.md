@@ -162,6 +162,7 @@ RAW_IO_LOG_KEEP_REQUESTS=10
 > - `WEB_CODE` 留空表示 Web UI 不启用访问码；填写后会启用 NextChat 自带的访问码页
 > - `UPSTREAM_BASE_URL` 可以写根域名，也可以直接写到 `/v1`
 > - 代理内部会统一规范到 `/v1`
+> - 如果上游服务就跑在 Docker 宿主机本机，不要写容器内的 `127.0.0.1`；应写 `http://host.docker.internal:<port>/v1`
 > - `UPSTREAM_MODE=messages` 时，请求会发到 `/v1/messages`
 > - `UPSTREAM_MODE=responses` 时，请求会发到 `/v1/responses`
 > - 默认 `UPSTREAM_STREAMING_ENABLED=true`，也就是即使客户端发普通非流式请求，proxy 也会优先用上游流式并在本地聚合结果
