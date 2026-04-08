@@ -5,7 +5,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.config import Settings
 from app.routes.chat_completions import router as chat_completions_router
@@ -98,6 +100,20 @@ async def log_error_request_body(request: Request, call_next):
         )
     try:
         response = await call_next(request)
+    except httpx.TimeoutException as exc:
+        response = _httpx_exception_response(
+            request,
+            request_id=request_id,
+            exc=exc,
+            status_code=504,
+        )
+    except httpx.HTTPError as exc:
+        response = _httpx_exception_response(
+            request,
+            request_id=request_id,
+            exc=exc,
+            status_code=502,
+        )
     finally:
         reset_current_request_id(token)
     if raw_logger is not None:
@@ -142,3 +158,39 @@ def _safe_log_body(body_bytes: bytes, *, content_type: str) -> str:
     if lowered.startswith("multipart/form-data"):
         return f"<multipart body omitted; {len(body_bytes)} bytes>"
     return body_bytes.decode("utf-8", errors="replace")
+
+
+def _httpx_exception_response(
+    request: Request,
+    *,
+    request_id: str,
+    exc: httpx.HTTPError,
+    status_code: int,
+) -> JSONResponse:
+    raw_logger: RawIOLogger | None = getattr(request.app.state, "raw_io_logger", None)
+    payload = {
+        "error": {
+            "message": f"Upstream transport error: {exc}",
+            "type": "server_error",
+            "param": None,
+            "code": "upstream_timeout" if status_code == 504 else "upstream_connection_error",
+        }
+    }
+    if raw_logger is not None:
+        raw_logger.log(
+            "proxy.unhandled_httpx_error",
+            {
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status_code,
+                "error_type": type(exc).__name__,
+                "error": payload,
+            },
+        )
+    logger.exception(
+        "Unhandled upstream transport error for %s %s",
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(status_code=status_code, content=payload)

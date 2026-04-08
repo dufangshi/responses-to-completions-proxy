@@ -70,7 +70,9 @@ def build_session_reuse_fallback_payload(
     if not payload.get("previous_response_id"):
         return None
 
-    full_input = session_context.get("full_input")
+    full_input = session_context.get("request_input")
+    if not isinstance(full_input, list) or not full_input:
+        full_input = session_context.get("full_input")
     if not isinstance(full_input, list) or not full_input:
         return None
 

@@ -7,33 +7,14 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.services.file_store import resolve_openai_payload_file_ids
+from app.services.responses_payload import ResponsesValidationError, normalize_responses_input
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 
 router = APIRouter()
 
 
 def _normalize_responses_input(payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(payload)
-    raw_input = normalized.get("input")
-
-    if isinstance(raw_input, str):
-        normalized["input"] = [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": raw_input}],
-            }
-        ]
-        return normalized
-
-    if isinstance(raw_input, list) and raw_input and all(isinstance(item, str) for item in raw_input):
-        normalized["input"] = [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": item}],
-            }
-            for item in raw_input
-        ]
-    return normalized
+    return normalize_responses_input(payload)
 
 
 def _normalize_payload_model(payload: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -104,7 +85,20 @@ async def create_response(request: Request) -> Response:
             },
         )
 
-    payload = _normalize_payload_model(raw_payload, request)
+    try:
+        payload = _normalize_payload_model(raw_payload, request)
+    except ResponsesValidationError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "param": exc.param,
+                    "code": exc.code,
+                }
+            },
+        )
 
     if payload.get("stream") is True:
         try:

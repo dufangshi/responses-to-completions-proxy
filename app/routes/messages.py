@@ -12,7 +12,13 @@ from typing import Any
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.services.file_store import resolve_native_message_file_ids, resolve_openai_payload_file_ids
+from app.services.file_store import (
+    normalize_input_file_reference_for_cache,
+    normalize_user_supplied_filename,
+    resolve_native_message_file_ids,
+    resolve_openai_payload_file_ids,
+)
+from app.services.responses_payload import ResponsesValidationError, validate_responses_input_items
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 from app.services.responses_session_store import ResponsesSessionState, ResponsesSessionStore
 from app.services.session_reuse_fallback import (
@@ -229,6 +235,10 @@ def _build_responses_payload_from_messages_request(
     resolved_model, reasoning_effort = settings.resolve_model_and_reasoning(None)
 
     input_items, system_text = _convert_messages_input(raw_payload)
+    try:
+        validate_responses_input_items(input_items)
+    except ResponsesValidationError as exc:
+        raise ValueError(str(exc)) from exc
 
     payload: dict[str, Any] = {
         "model": resolved_model,
@@ -375,13 +385,17 @@ async def _prepare_responses_session_reuse(
     if not isinstance(input_items, list) or not input_items:
         return None
 
-    canonical_full_input = _canonicalize_json_like(input_items)
+    request_input = copy.deepcopy(input_items)
+    canonical_full_input = _canonicalize_json_like(
+        _normalize_responses_session_input_items(input_items)
+    )
     context = {
         "session_key": session_key,
         "model": _string(payload.get("model")) or "",
         "instructions_hash": _hash_json_payload(payload.get("instructions")),
         "tools_hash": _hash_json_payload(payload.get("tools")),
         "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
+        "request_input": request_input,
         "full_input": canonical_full_input,
         "reused": False,
         "store_session_state": True,
@@ -422,10 +436,13 @@ async def _prepare_responses_session_reuse(
         return context
 
     appended_input = canonical_full_input[len(previous_input) :]
-    stateless_tool_delta = build_stateless_tool_delta_input(
-        previous_input=previous_input,
-        appended_input=appended_input,
-    )
+    appended_request_input = request_input[len(previous_input) :]
+    stateless_tool_delta = None
+    if not _input_items_include_files(previous_input) and not _input_items_include_files(appended_input):
+        stateless_tool_delta = build_stateless_tool_delta_input(
+            previous_input=previous_input,
+            appended_input=appended_input,
+        )
     if stateless_tool_delta is not None:
         payload["input"] = copy.deepcopy(stateless_tool_delta)
         payload.pop("previous_response_id", None)
@@ -446,6 +463,8 @@ async def _prepare_responses_session_reuse(
         return context
 
     delta_input = _trim_replayed_assistant_input(appended_input)
+    replayed_assistant_prefix = len(appended_input) - len(delta_input)
+    delta_request_input = appended_request_input[replayed_assistant_prefix:]
     if not delta_input:
         if raw_logger is not None:
             raw_logger.log(
@@ -462,8 +481,8 @@ async def _prepare_responses_session_reuse(
 
     if should_force_full_input_replay(delta_input):
         payload.pop("previous_response_id", None)
-        payload["input"] = copy.deepcopy(canonical_full_input)
-        context["delta_input"] = copy.deepcopy(canonical_full_input)
+        payload["input"] = copy.deepcopy(request_input)
+        context["delta_input"] = copy.deepcopy(request_input)
         context["session_reuse_mode"] = "tool_output_full_replay"
         if raw_logger is not None:
             raw_logger.log(
@@ -480,9 +499,9 @@ async def _prepare_responses_session_reuse(
         return context
 
     payload["previous_response_id"] = previous_state.response_id
-    payload["input"] = copy.deepcopy(delta_input)
+    payload["input"] = copy.deepcopy(delta_request_input)
     context["reused"] = True
-    context["delta_input"] = delta_input
+    context["delta_input"] = copy.deepcopy(delta_request_input)
     context["previous_response_id"] = previous_state.response_id
 
     if raw_logger is not None:
@@ -528,6 +547,22 @@ def _trim_replayed_assistant_input(input_items: list[dict[str, Any]]) -> list[di
             break
         index += 1
     return input_items[index:]
+
+
+def _input_items_include_files(input_items: list[dict[str, Any]] | Any) -> bool:
+    if not isinstance(input_items, list):
+        return False
+    return any(_value_includes_input_file(item) for item in input_items)
+
+
+def _value_includes_input_file(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_value_includes_input_file(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if _string(value.get("type")).strip().lower() == "input_file":
+        return True
+    return any(_value_includes_input_file(item) for item in value.values())
 
 
 def _is_assistant_originated_item(item: Any) -> bool:
@@ -987,7 +1022,10 @@ def _extract_input_file_from_document_block(
             )
         return {
             "type": "input_file",
-            "filename": filename,
+            "filename": normalize_user_supplied_filename(
+                filename,
+                fallback="document.pdf",
+            ),
             "file_data": f"data:{media_type.strip()};base64,{data.strip()}",
         }
 
@@ -999,7 +1037,10 @@ def _extract_input_file_from_document_block(
             )
         return {
             "type": "input_file",
-            "filename": filename,
+            "filename": normalize_user_supplied_filename(
+                filename,
+                fallback="document.pdf",
+            ),
             "file_url": url.strip(),
         }
 
@@ -1011,7 +1052,10 @@ def _extract_input_file_from_document_block(
             )
         return {
             "type": "input_file",
-            "filename": filename,
+            "filename": normalize_user_supplied_filename(
+                filename,
+                fallback="document.pdf",
+            ),
             "file_id": file_id.strip(),
         }
 
@@ -1031,10 +1075,10 @@ def _extract_input_file_block(
     file_url = block.get("file_url")
     filename = block.get("filename")
 
-    if isinstance(filename, str) and filename.strip():
-        resolved_filename = filename.strip()
-    else:
-        resolved_filename = "document.pdf"
+    resolved_filename = normalize_user_supplied_filename(
+        filename,
+        fallback="upload.bin",
+    )
 
     if isinstance(file_id, str) and file_id.strip():
         return {
@@ -1066,8 +1110,27 @@ def _document_filename(block: dict[str, Any]) -> str:
     for key in ("title", "filename", "name"):
         value = block.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return normalize_user_supplied_filename(value, fallback="document.pdf")
     return "document.pdf"
+
+
+def _normalize_responses_session_input_items(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_normalize_responses_session_item(item) for item in input_items]
+
+
+def _normalize_responses_session_item(item: Any) -> Any:
+    if isinstance(item, list):
+        return [_normalize_responses_session_item(entry) for entry in item]
+    if not isinstance(item, dict):
+        return item
+
+    if _string(item.get("type")).strip().lower() == "input_file":
+        return normalize_input_file_reference_for_cache(item)
+
+    return {
+        str(key): _normalize_responses_session_item(value)
+        for key, value in item.items()
+    }
 
 
 def _convert_tool_result_output(raw_content: Any) -> str:

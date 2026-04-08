@@ -142,16 +142,18 @@ export class ClaudeApi implements LLMApi {
         }
         return {
           role: insideRole,
-          content: content
-            .filter((v) => v.image_url || v.text)
-            .map(({ type, text, image_url }) => {
-              if (type === "text") {
-                return {
-                  type,
-                  text: text!,
-                };
+          content: content.reduce<any[]>((parts, part) => {
+              if (part.type === "text") {
+                parts.push({
+                  type: part.type,
+                  text: part.text ?? "",
+                });
+                return parts;
               }
-              const { url = "" } = image_url || {};
+              if (part.type !== "image_url") {
+                return parts;
+              }
+              const { url = "" } = part.image_url || {};
               const colonIndex = url.indexOf(":");
               const semicolonIndex = url.indexOf(";");
               const comma = url.indexOf(",");
@@ -160,15 +162,16 @@ export class ClaudeApi implements LLMApi {
               const encodeType = url.slice(semicolonIndex + 1, comma);
               const data = url.slice(comma + 1);
 
-              return {
+              parts.push({
                 type: "image" as const,
                 source: {
                   type: encodeType,
                   media_type: mimeType,
                   data,
                 },
-              };
-            }),
+              });
+              return parts;
+            }, []),
         };
       });
 

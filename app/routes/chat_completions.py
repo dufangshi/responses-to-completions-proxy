@@ -12,7 +12,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.models.legacy_completions import CompletionUsage
 from app.models.legacy_chat_completions import LegacyChatCompletionRequest
-from app.services.file_store import resolve_openai_payload_file_ids
+from app.services.file_store import (
+    normalize_input_file_reference_for_cache,
+    resolve_openai_payload_file_ids,
+)
 from app.services.responses_client import BaseResponsesGateway, UpstreamAPIError
 from app.services.responses_session_store import ResponsesSessionState, ResponsesSessionStore
 from app.services.session_reuse_fallback import (
@@ -186,8 +189,8 @@ async def create_chat_completion(
                 "error": {
                     "message": str(exc),
                     "type": "invalid_request_error",
-                    "param": None,
-                    "code": None,
+                    "param": exc.param,
+                    "code": exc.code,
                 }
             },
         )
@@ -666,6 +669,7 @@ async def _prepare_chat_responses_session_reuse(
     if not isinstance(input_items, list) or not input_items:
         return None
 
+    request_input = copy.deepcopy(input_items)
     canonical_full_input = _canonicalize_json_like(
         _normalize_chat_session_input_items(input_items)
     )
@@ -677,6 +681,7 @@ async def _prepare_chat_responses_session_reuse(
         "instructions_hash": _hash_json_payload(payload.get("instructions")),
         "tools_hash": _hash_json_payload(payload.get("tools")),
         "tool_choice_hash": _hash_json_payload(payload.get("tool_choice")),
+        "request_input": request_input,
         "full_input": canonical_full_input,
         "match_input": canonical_match_input,
         "source_fingerprint": _build_chat_request_source_fingerprint(request),
@@ -728,7 +733,6 @@ async def _prepare_chat_responses_session_reuse(
                 )
             return context
 
-        payload["input"] = copy.deepcopy(frozen_context["full_input"])
         context.update(frozen_context)
         if raw_logger is not None:
             raw_logger.log(
@@ -783,10 +787,12 @@ async def _prepare_chat_responses_session_reuse(
         return context
 
     appended_input = canonical_full_input[len(previous_input) :]
-    stateless_tool_delta = build_stateless_tool_delta_input(
-        previous_input=previous_input,
-        appended_input=appended_input,
-    )
+    stateless_tool_delta = None
+    if not _input_items_include_files(previous_input) and not _input_items_include_files(appended_input):
+        stateless_tool_delta = build_stateless_tool_delta_input(
+            previous_input=previous_input,
+            appended_input=appended_input,
+        )
     if stateless_tool_delta is not None:
         payload["input"] = copy.deepcopy(stateless_tool_delta)
         payload.pop("previous_response_id", None)
@@ -813,6 +819,7 @@ async def _prepare_chat_responses_session_reuse(
         start_index=len(previous_match_input),
     )
     delta_input = canonical_full_input[delta_start_index:]
+    delta_request_input = request_input[delta_start_index:]
     if not delta_input:
         if raw_logger is not None:
             raw_logger.log(
@@ -831,8 +838,8 @@ async def _prepare_chat_responses_session_reuse(
 
     if should_force_full_input_replay(delta_input):
         payload.pop("previous_response_id", None)
-        payload["input"] = copy.deepcopy(canonical_full_input)
-        context["delta_input"] = copy.deepcopy(canonical_full_input)
+        payload["input"] = copy.deepcopy(request_input)
+        context["delta_input"] = copy.deepcopy(request_input)
         context["session_reuse_mode"] = "tool_output_full_replay"
         if raw_logger is not None:
             raw_logger.log(
@@ -851,9 +858,9 @@ async def _prepare_chat_responses_session_reuse(
         return context
 
     payload["previous_response_id"] = previous_state.response_id
-    payload["input"] = copy.deepcopy(delta_input)
+    payload["input"] = copy.deepcopy(delta_request_input)
     context["reused"] = True
-    context["delta_input"] = delta_input
+    context["delta_input"] = copy.deepcopy(delta_request_input)
     context["previous_response_id"] = previous_state.response_id
 
     if raw_logger is not None:
@@ -983,6 +990,22 @@ def _skip_replayed_assistant_prefix(
             break
         index += 1
     return index
+
+
+def _input_items_include_files(input_items: list[dict[str, Any]] | Any) -> bool:
+    if not isinstance(input_items, list):
+        return False
+    return any(_value_includes_input_file(item) for item in input_items)
+
+
+def _value_includes_input_file(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_value_includes_input_file(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if _string(value.get("type")).strip().lower() == "input_file":
+        return True
+    return any(_value_includes_input_file(item) for item in value.values())
 
 
 def _is_assistant_originated_item(item: Any) -> bool:
@@ -1211,6 +1234,9 @@ def _normalize_chat_match_item(item: Any) -> Any:
     if not isinstance(item, dict):
         return item
 
+    if _string(item.get("type")).strip().lower() == "input_file":
+        return normalize_input_file_reference_for_cache(item)
+
     normalized_item: dict[str, Any] = {}
     for key, value in item.items():
         if key == "call_id":
@@ -1257,13 +1283,14 @@ def _normalize_chat_session_content(content_items: list[dict[str, Any]]) -> list
 
     normalized_content: list[dict[str, Any]] = []
     for index, part in enumerate(content_items):
+        normalized_part = _normalize_chat_match_item(part)
         if index == 0:
-            normalized_first = _normalize_nanobot_runtime_part(part)
+            normalized_first = _normalize_nanobot_runtime_part(normalized_part)
             if normalized_first is None:
                 continue
             normalized_content.append(normalized_first)
             continue
-        normalized_content.append(part)
+        normalized_content.append(normalized_part)
     return normalized_content
 
 

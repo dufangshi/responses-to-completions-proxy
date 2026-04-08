@@ -34,6 +34,7 @@ import ConfirmIcon from "../icons/confirm.svg";
 import CloseIcon from "../icons/close.svg";
 import CancelIcon from "../icons/cancel.svg";
 import ImageIcon from "../icons/image.svg";
+import UploadIcon from "../icons/upload.svg";
 
 import LightIcon from "../icons/light.svg";
 import DarkIcon from "../icons/dark.svg";
@@ -64,6 +65,7 @@ import {
 
 import {
   autoGrowTextArea,
+  getMessageFiles,
   copyToClipboard,
   getMessageImages,
   getMessageTextContent,
@@ -77,7 +79,15 @@ import {
   showPlugins,
 } from "../utils";
 
-import { uploadImage as uploadImageRemote } from "@/app/utils/chat";
+import {
+  uploadImage as uploadImageRemote,
+} from "@/app/utils/chat";
+import {
+  deleteOpenAIFile,
+  isSupportedChatAttachmentFile,
+  normalizeAttachmentFilename,
+  uploadOpenAIFile,
+} from "@/app/utils/openai-files";
 
 import dynamic from "next/dynamic";
 
@@ -116,7 +126,11 @@ import { prettyObject } from "../utils/format";
 import { ExportMessageModal } from "./exporter";
 import { getClientConfig } from "../config/client";
 import { useAllModels } from "../utils/hooks";
-import { ClientApi, MultimodalContent } from "../client/api";
+import {
+  ClientApi,
+  MultimodalContent,
+  UploadedFileRef,
+} from "../client/api";
 import { createTTSPlayer } from "../utils/audio";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "../utils/ms_edge_tts";
 
@@ -493,7 +507,9 @@ function useScrollToBottom(
 
 export function ChatActions(props: {
   uploadImage: () => void;
+  uploadFiles: () => void;
   setAttachImages: (images: string[]) => void;
+  setAttachFiles: (files: UploadedFileRef[]) => void;
   setUploading: (uploading: boolean) => void;
   showPromptModal: () => void;
   scrollToBottom: () => void;
@@ -555,6 +571,7 @@ export function ChatActions(props: {
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [showPluginSelector, setShowPluginSelector] = useState(false);
   const [showUploadImage, setShowUploadImage] = useState(false);
+  const [showUploadFiles, setShowUploadFiles] = useState(false);
 
   const [showSizeSelector, setShowSizeSelector] = useState(false);
   const [showQualitySelector, setShowQualitySelector] = useState(false);
@@ -575,6 +592,13 @@ export function ChatActions(props: {
     if (!show) {
       props.setAttachImages([]);
       props.setUploading(false);
+    }
+
+    const supportsFiles =
+      currentProviderName === ServiceProvider.OpenAI && !isDalle3(currentModel);
+    setShowUploadFiles(supportsFiles);
+    if (!supportsFiles) {
+      props.setAttachFiles([]);
     }
 
     // if current model is not available
@@ -626,6 +650,13 @@ export function ChatActions(props: {
             onClick={props.uploadImage}
             text={Locale.Chat.InputActions.UploadImage}
             icon={props.uploading ? <LoadingButtonIcon /> : <ImageIcon />}
+          />
+        )}
+        {showUploadFiles && (
+          <ChatAction
+            onClick={props.uploadFiles}
+            text={Locale.Chat.InputActions.UploadFile}
+            icon={props.uploading ? <LoadingButtonIcon /> : <UploadIcon />}
           />
         )}
         <ChatAction
@@ -911,9 +942,9 @@ export function EditMessageModal(props: { onClose: () => void }) {
   );
 }
 
-export function DeleteImageButton(props: { deleteImage: () => void }) {
+export function DeleteAttachmentButton(props: { onDelete: () => void }) {
   return (
-    <div className={styles["delete-image"]} onClick={props.deleteImage}>
+    <div className={styles["delete-image"]} onClick={props.onDelete}>
       <DeleteIcon />
     </div>
   );
@@ -1032,7 +1063,17 @@ function _Chat() {
   const isMobileScreen = useMobileScreen();
   const navigate = useNavigate();
   const [attachImages, setAttachImages] = useState<string[]>([]);
+  const [attachFiles, setAttachFiles] = useState<UploadedFileRef[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const currentModel = session.mask.modelConfig.model;
+  const currentProviderName =
+    session.mask.modelConfig?.providerName || ServiceProvider.OpenAI;
+  const supportsImageAttachments = isVisionModel(currentModel);
+  const supportsFileAttachments =
+    currentProviderName === ServiceProvider.OpenAI && !isDalle3(currentModel);
+  const MAX_ATTACH_IMAGES = 3;
+  const MAX_ATTACH_FILES = 3;
 
   // prompt hints
   const promptStore = usePromptStore();
@@ -1103,7 +1144,13 @@ function _Chat() {
   };
 
   const doSubmit = (userInput: string) => {
-    if (userInput.trim() === "" && isEmpty(attachImages)) return;
+    if (uploading) return;
+    if (
+      userInput.trim() === "" &&
+      isEmpty(attachImages) &&
+      isEmpty(attachFiles)
+    )
+      return;
     const matchCommand = chatCommands.match(userInput);
     if (matchCommand.matched) {
       setUserInput("");
@@ -1113,9 +1160,10 @@ function _Chat() {
     }
     setIsLoading(true);
     chatStore
-      .onUserInput(userInput, attachImages)
+      .onUserInput(userInput, attachImages, attachFiles)
       .then(() => setIsLoading(false));
     setAttachImages([]);
+    setAttachFiles([]);
     chatStore.setLastInput(userInput);
     setUserInput("");
     setPromptHints([]);
@@ -1266,7 +1314,10 @@ function _Chat() {
     setIsLoading(true);
     const textContent = getMessageTextContent(userMessage);
     const images = getMessageImages(userMessage);
-    chatStore.onUserInput(textContent, images).then(() => setIsLoading(false));
+    const files = getMessageFiles(userMessage);
+    chatStore
+      .onUserInput(textContent, images, files)
+      .then(() => setIsLoading(false));
     inputRef.current?.focus();
   };
 
@@ -1509,10 +1560,116 @@ function _Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const releaseComposerFiles = useCallback(async (files: UploadedFileRef[]) => {
+    const uniqueFileIds = Array.from(
+      new Set(files.map((file) => file.fileId).filter(Boolean)),
+    );
+    await Promise.allSettled(uniqueFileIds.map((fileId) => deleteOpenAIFile(fileId)));
+  }, []);
+
+  const clearComposer = useCallback(
+    async ({ deletePendingFiles = true }: { deletePendingFiles?: boolean } = {}) => {
+      const filesToDelete = deletePendingFiles ? attachFiles : [];
+      setAttachImages([]);
+      setAttachFiles([]);
+      setUserInput("");
+      setPromptHints([]);
+      if (deletePendingFiles && filesToDelete.length > 0) {
+        await releaseComposerFiles(filesToDelete);
+      }
+    },
+    [attachFiles, releaseComposerFiles],
+  );
+
+  const appendImageAttachments = useCallback(
+    (uploadedImages: string[]) => {
+      if (uploadedImages.length === 0) {
+        return;
+      }
+      const nextImages = [...attachImages, ...uploadedImages];
+      if (nextImages.length > MAX_ATTACH_IMAGES) {
+        showToast(Locale.Chat.Attachments.TooManyImages(MAX_ATTACH_IMAGES));
+      }
+      setAttachImages(nextImages.slice(0, MAX_ATTACH_IMAGES));
+    },
+    [attachImages],
+  );
+
+  const appendFileAttachments = useCallback(
+    (uploadedFiles: UploadedFileRef[]) => {
+      if (uploadedFiles.length === 0) {
+        return;
+      }
+      const combinedFiles = [...attachFiles, ...uploadedFiles];
+      const keptFiles = combinedFiles.slice(0, MAX_ATTACH_FILES);
+      const droppedFiles = combinedFiles.slice(MAX_ATTACH_FILES);
+      if (droppedFiles.length > 0) {
+        showToast(Locale.Chat.Attachments.TooManyFiles(MAX_ATTACH_FILES));
+        void releaseComposerFiles(droppedFiles);
+      }
+      setAttachFiles(keptFiles);
+    },
+    [attachFiles, releaseComposerFiles],
+  );
+
+  const addComposerAttachments = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) {
+        return;
+      }
+
+      const imageFiles = supportsImageAttachments
+        ? files.filter((file) => file.type.startsWith("image/"))
+        : [];
+      const documentFiles = supportsFileAttachments
+        ? files.filter((file) => isSupportedChatAttachmentFile(file))
+        : [];
+      const unsupportedFiles = files.filter(
+        (file) => !imageFiles.includes(file) && !documentFiles.includes(file),
+      );
+
+      if (unsupportedFiles.length > 0) {
+        showToast(Locale.Chat.Attachments.UnsupportedFile);
+      }
+
+      if (imageFiles.length === 0 && documentFiles.length === 0) {
+        return;
+      }
+
+      setUploading(true);
+      try {
+        const [uploadedImages, uploadedFiles] = await Promise.all([
+          Promise.all(imageFiles.map((file) => uploadImageRemote(file))),
+          Promise.all(
+            documentFiles.map((file) =>
+              uploadOpenAIFile(
+                new File([file], normalizeAttachmentFilename(file.name, file), {
+                  type: file.type,
+                }),
+              ),
+            ),
+          ),
+        ]);
+        appendImageAttachments(uploadedImages);
+        appendFileAttachments(uploadedFiles);
+      } catch (error) {
+        console.error("[Chat] failed to upload attachments", error);
+        showToast(error instanceof Error ? error.message : "upload failed");
+      } finally {
+        setUploading(false);
+      }
+    },
+    [
+      appendFileAttachments,
+      appendImageAttachments,
+      supportsFileAttachments,
+      supportsImageAttachments,
+    ],
+  );
+
   const handlePaste = useCallback(
     async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const currentModel = chatStore.currentSession().mask.modelConfig.model;
-      if (!isVisionModel(currentModel)) {
+      if (!supportsImageAttachments) {
         return;
       }
       const items = (event.clipboardData || window.clipboardData).items;
@@ -1521,81 +1678,103 @@ function _Chat() {
           event.preventDefault();
           const file = item.getAsFile();
           if (file) {
-            const images: string[] = [];
-            images.push(...attachImages);
-            images.push(
-              ...(await new Promise<string[]>((res, rej) => {
-                setUploading(true);
-                const imagesData: string[] = [];
-                uploadImageRemote(file)
-                  .then((dataUrl) => {
-                    imagesData.push(dataUrl);
-                    setUploading(false);
-                    res(imagesData);
-                  })
-                  .catch((e) => {
-                    setUploading(false);
-                    rej(e);
-                  });
-              })),
-            );
-            const imagesLength = images.length;
-
-            if (imagesLength > 3) {
-              images.splice(3, imagesLength - 3);
-            }
-            setAttachImages(images);
+            await addComposerAttachments([file]);
           }
         }
       }
     },
-    [attachImages, chatStore],
+    [addComposerAttachments, supportsImageAttachments],
   );
 
   async function uploadImage() {
-    const images: string[] = [];
-    images.push(...attachImages);
-
-    images.push(
-      ...(await new Promise<string[]>((res, rej) => {
-        const fileInput = document.createElement("input");
-        fileInput.type = "file";
-        fileInput.accept =
-          "image/png, image/jpeg, image/webp, image/heic, image/heif";
-        fileInput.multiple = true;
-        fileInput.onchange = (event: any) => {
-          setUploading(true);
-          const files = event.target.files;
-          const imagesData: string[] = [];
-          for (let i = 0; i < files.length; i++) {
-            const file = event.target.files[i];
-            uploadImageRemote(file)
-              .then((dataUrl) => {
-                imagesData.push(dataUrl);
-                if (
-                  imagesData.length === 3 ||
-                  imagesData.length === files.length
-                ) {
-                  setUploading(false);
-                  res(imagesData);
-                }
-              })
-              .catch((e) => {
-                setUploading(false);
-                rej(e);
-              });
-          }
-        };
-        fileInput.click();
-      })),
-    );
-
-    const imagesLength = images.length;
-    if (imagesLength > 3) {
-      images.splice(3, imagesLength - 3);
-    }
-    setAttachImages(images);
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept =
+      "image/png, image/jpeg, image/webp, image/heic, image/heif";
+    fileInput.multiple = true;
+    fileInput.onchange = async (event: Event) => {
+      const target = event.target as HTMLInputElement;
+      const files = Array.from(target.files ?? []);
+      await addComposerAttachments(files);
+      target.value = "";
+    };
+    fileInput.click();
   }
+
+  async function uploadFiles() {
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".pdf,.txt,application/pdf,text/plain";
+    fileInput.multiple = true;
+    fileInput.onchange = async (event: Event) => {
+      const target = event.target as HTMLInputElement;
+      const files = Array.from(target.files ?? []);
+      await addComposerAttachments(files);
+      target.value = "";
+    };
+    fileInput.click();
+  }
+
+  const handleDragOver = useCallback(
+    (event: React.DragEvent<HTMLLabelElement>) => {
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length === 0) {
+        return;
+      }
+      const hasSupportedAttachment = files.some(
+        (file) =>
+          (supportsImageAttachments && file.type.startsWith("image/")) ||
+          (supportsFileAttachments && isSupportedChatAttachmentFile(file)),
+      );
+      if (!hasSupportedAttachment) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setIsDraggingFiles(true);
+    },
+    [supportsFileAttachments, supportsImageAttachments],
+  );
+
+  const handleDragLeave = useCallback(
+    (event: React.DragEvent<HTMLLabelElement>) => {
+      if (event.currentTarget.contains(event.relatedTarget as Node)) {
+        return;
+      }
+      setIsDraggingFiles(false);
+    },
+    [],
+  );
+
+  const handleDrop = useCallback(
+    async (event: React.DragEvent<HTMLLabelElement>) => {
+      event.preventDefault();
+      setIsDraggingFiles(false);
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      await addComposerAttachments(files);
+    },
+    [addComposerAttachments],
+  );
+
+  const removeAttachFile = useCallback(
+    (fileId: string) => {
+      const targetFile = attachFiles.find((file) => file.fileId === fileId);
+      setAttachFiles((files) => files.filter((file) => file.fileId !== fileId));
+      if (targetFile) {
+        void releaseComposerFiles([targetFile]);
+      }
+    },
+    [attachFiles, releaseComposerFiles],
+  );
+
+  const canClearComposer =
+    userInput.trim().length > 0 ||
+    attachImages.length > 0 ||
+    attachFiles.length > 0;
+
+  const clearComposerInput = useCallback(() => {
+    void clearComposer();
+  }, [clearComposer]);
 
   // 快捷键 shortcut keys
   const [showShortcutKeyModal, setShowShortcutKeyModal] = useState(false);
@@ -1821,18 +2000,35 @@ function _Chat() {
                                       | string
                                       | MultimodalContent[] = newMessage;
                                     const images = getMessageImages(message);
-                                    if (images.length > 0) {
-                                      newContent = [
-                                        { type: "text", text: newMessage },
-                                      ];
+                                    const files = getMessageFiles(message);
+                                    if (images.length > 0 || files.length > 0) {
+                                      const nextContent: MultimodalContent[] = [];
+                                      if (newMessage) {
+                                        nextContent.push({
+                                          type: "text",
+                                          text: newMessage,
+                                        });
+                                      }
                                       for (let i = 0; i < images.length; i++) {
-                                        newContent.push({
+                                        nextContent.push({
                                           type: "image_url",
                                           image_url: {
                                             url: images[i],
                                           },
                                         });
                                       }
+                                      for (const file of files) {
+                                        nextContent.push({
+                                          type: "file",
+                                          file: {
+                                            file_id: file.fileId,
+                                            filename: file.filename,
+                                            content_type: file.contentType,
+                                            bytes: file.bytes,
+                                          },
+                                        });
+                                      }
+                                      newContent = nextContent;
                                     }
                                     chatStore.updateTargetSession(
                                       session,
@@ -2020,6 +2216,29 @@ function _Chat() {
                                 )}
                               </div>
                             )}
+                            {getMessageFiles(message).length > 0 && (
+                              <div className={styles["chat-message-files"]}>
+                                {getMessageFiles(message).map((file) => (
+                                  <a
+                                    key={file.fileId}
+                                    className={styles["chat-message-file"]}
+                                    href={`/api/openai/v1/files/${file.fileId}/content`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <span className={styles["chat-message-file-ext"]}>
+                                      {file.filename
+                                        .split(".")
+                                        .pop()
+                                        ?.toUpperCase() || "FILE"}
+                                    </span>
+                                    <span className={styles["chat-message-file-name"]}>
+                                      {file.filename}
+                                    </span>
+                                  </a>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           {message?.audio_url && (
                             <div className={styles["chat-message-audio"]}>
@@ -2047,7 +2266,9 @@ function _Chat() {
 
               <ChatActions
                 uploadImage={uploadImage}
+                uploadFiles={uploadFiles}
                 setAttachImages={setAttachImages}
+                setAttachFiles={setAttachFiles}
                 setUploading={setUploading}
                 showPromptModal={() => setShowPromptModal(true)}
                 scrollToBottom={scrollToBottom}
@@ -2071,9 +2292,13 @@ function _Chat() {
               <label
                 className={clsx(styles["chat-input-panel-inner"], {
                   [styles["chat-input-panel-inner-attach"]]:
-                    attachImages.length !== 0,
+                    attachImages.length !== 0 || attachFiles.length !== 0,
+                  [styles["chat-input-panel-inner-drag"]]: isDraggingFiles,
                 })}
                 htmlFor="chat-input"
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
               >
                 <textarea
                   id="chat-input"
@@ -2093,7 +2318,7 @@ function _Chat() {
                     fontFamily: config.fontFamily,
                   }}
                 />
-                {attachImages.length != 0 && (
+                {(attachImages.length !== 0 || attachFiles.length !== 0) && (
                   <div className={styles["attach-images"]}>
                     {attachImages.map((image, index) => {
                       return (
@@ -2103,8 +2328,8 @@ function _Chat() {
                           style={{ backgroundImage: `url("${image}")` }}
                         >
                           <div className={styles["attach-image-mask"]}>
-                            <DeleteImageButton
-                              deleteImage={() => {
+                            <DeleteAttachmentButton
+                              onDelete={() => {
                                 setAttachImages(
                                   attachImages.filter((_, i) => i !== index),
                                 );
@@ -2114,7 +2339,39 @@ function _Chat() {
                         </div>
                       );
                     })}
+                    {attachFiles.map((file) => {
+                      const extension =
+                        file.filename.split(".").pop()?.toUpperCase() || "FILE";
+                      return (
+                        <div
+                          key={file.fileId}
+                          className={styles["attach-file"]}
+                          title={file.filename}
+                        >
+                          <div className={styles["attach-file-ext"]}>
+                            {extension}
+                          </div>
+                          <div className={styles["attach-file-name"]}>
+                            {file.filename}
+                          </div>
+                          <div className={styles["attach-image-mask"]}>
+                            <DeleteAttachmentButton
+                              onDelete={() => removeAttachFile(file.fileId)}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
+                )}
+                {canClearComposer && (
+                  <IconButton
+                    icon={<DeleteIcon />}
+                    text={Locale.Chat.InputActions.ClearInput}
+                    className={styles["chat-input-clear"]}
+                    bordered
+                    onClick={clearComposerInput}
+                  />
                 )}
                 <IconButton
                   icon={<SendWhiteIcon />}

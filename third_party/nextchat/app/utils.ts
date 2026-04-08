@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { showToast } from "./components/ui-lib";
 import Locale from "./locales";
-import { RequestMessage } from "./client/api";
+import { RequestMessage, UploadedFileRef } from "./client/api";
 import {
   REQUEST_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS_FOR_THINKING,
@@ -278,6 +278,24 @@ export function getMessageImages(message: RequestMessage): string[] {
     }
   }
   return urls;
+}
+
+export function getMessageFiles(message: RequestMessage): UploadedFileRef[] {
+  if (typeof message.content === "string") {
+    return [];
+  }
+  const files: UploadedFileRef[] = [];
+  for (const c of message.content) {
+    if (c.type === "file" && c.file?.file_id) {
+      files.push({
+        fileId: c.file.file_id,
+        filename: c.file.filename ?? "document.pdf",
+        contentType: c.file.content_type,
+        bytes: c.file.bytes,
+      });
+    }
+  }
+  return files;
 }
 
 export function isVisionModel(model: string) {

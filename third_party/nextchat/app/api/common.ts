@@ -10,6 +10,11 @@ export async function requestOpenai(req: NextRequest) {
   const controller = new AbortController();
 
   const isAzure = req.nextUrl.pathname.includes("azure/deployments");
+  const incomingContentType = req.headers.get("Content-Type")?.trim() ?? "";
+  const isJsonRequest = incomingContentType
+    .toLowerCase()
+    .includes("application/json");
+  const incomingAccept = req.headers.get("Accept")?.trim() ?? "";
 
   var authValue,
     authHeaderName = "";
@@ -91,18 +96,24 @@ export async function requestOpenai(req: NextRequest) {
 
   const fetchUrl = cloudflareAIGatewayUrl(`${baseUrl}/${path}`);
   console.log("fetchUrl", fetchUrl);
+  const proxyHeaders: Record<string, string> = {
+    "Cache-Control": "no-store",
+    [authHeaderName]: authValue,
+    ...(nanobotSessionKey && {
+      "x-nanobot-session-key": nanobotSessionKey,
+    }),
+    ...(serverConfig.openaiOrgId && {
+      "OpenAI-Organization": serverConfig.openaiOrgId,
+    }),
+  };
+  if (incomingContentType) {
+    proxyHeaders["Content-Type"] = incomingContentType;
+  }
+  if (incomingAccept) {
+    proxyHeaders["Accept"] = incomingAccept;
+  }
   const fetchOptions: RequestInit = {
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      [authHeaderName]: authValue,
-      ...(nanobotSessionKey && {
-        "x-nanobot-session-key": nanobotSessionKey,
-      }),
-      ...(serverConfig.openaiOrgId && {
-        "OpenAI-Organization": serverConfig.openaiOrgId,
-      }),
-    },
+    headers: proxyHeaders,
     method: req.method,
     body: req.body,
     // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
@@ -113,7 +124,7 @@ export async function requestOpenai(req: NextRequest) {
   };
 
   // #1815 try to refuse gpt4 request
-  if (serverConfig.customModels && req.body) {
+  if (serverConfig.customModels && req.body && isJsonRequest) {
     try {
       const clonedBody = await req.text();
       fetchOptions.body = clonedBody;

@@ -104,7 +104,14 @@ class OpenAIResponsesGateway(BaseResponsesGateway):
             "upstream.request",
             {"provider": "openai", "path": "/responses", "stream": False, "payload": payload},
         )
-        response = await self._client.post("/responses", json=payload)
+        response = await _post_json_with_retry(
+            client=self._client,
+            path="/responses",
+            payload=payload,
+            provider="openai",
+            stream=False,
+            raw_logger=self._raw_logger,
+        )
         self._raw_logger.log(
             "upstream.response",
             {
@@ -145,7 +152,14 @@ class OpenAIResponsesGateway(BaseResponsesGateway):
             json=payload,
             headers=headers,
         )
-        response = await self._client.send(request, stream=True)
+        response = await _send_request_with_retry(
+            client=self._client,
+            request=request,
+            provider="openai",
+            path="/responses",
+            stream=True,
+            raw_logger=self._raw_logger,
+        )
         self._raw_logger.log(
             "upstream.response",
             {
@@ -172,12 +186,27 @@ class OpenAIResponsesGateway(BaseResponsesGateway):
 
         async def iterator() -> AsyncIterator[str]:
             try:
-                async for line in response.aiter_lines():
-                    self._raw_logger.log(
-                        "upstream.response.stream_line",
-                        {"provider": "openai", "path": "/responses", "line": line},
+                try:
+                    async for line in response.aiter_lines():
+                        self._raw_logger.log(
+                            "upstream.response.stream_line",
+                            {"provider": "openai", "path": "/responses", "line": line},
+                        )
+                        yield line
+                except httpx.HTTPError as exc:
+                    error = _wrap_transport_exception(
+                        exc,
+                        provider="openai",
+                        path="/responses",
+                        stream=True,
+                        raw_logger=self._raw_logger,
                     )
-                    yield line
+                    for line in _build_response_failed_sse_lines(error):
+                        self._raw_logger.log(
+                            "upstream.response.stream_line",
+                            {"provider": "openai", "path": "/responses", "line": line},
+                        )
+                        yield line
             finally:
                 await response.aclose()
 
@@ -463,51 +492,24 @@ class GeminiResponsesGateway(BaseResponsesGateway):
             self._last_request_started_at = now
 
     async def _post_with_retry(self, *, path: str, payload: dict[str, Any]) -> httpx.Response:
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                response = await self._client.post(path, json=payload)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt >= attempts:
-                    raise
-                await asyncio.sleep(_retry_delay_seconds(attempt))
-                continue
-
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < attempts:
-                await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
-                continue
-            return response
-        return await self._client.post(path, json=payload)
+        return await _post_json_with_retry(
+            client=self._client,
+            path=path,
+            payload=payload,
+            provider="gemini",
+            stream=False,
+            raw_logger=self._raw_logger,
+        )
 
     async def _send_with_retry(self, request: httpx.Request) -> httpx.Response:
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                response = await self._client.send(request, stream=True)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt >= attempts:
-                    raise
-                await asyncio.sleep(_retry_delay_seconds(attempt))
-                request = self._client.build_request(
-                    request.method,
-                    str(request.url),
-                    content=request.content,
-                    headers=request.headers,
-                )
-                continue
-
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < attempts:
-                await response.aclose()
-                await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
-                request = self._client.build_request(
-                    request.method,
-                    str(request.url),
-                    content=request.content,
-                    headers=request.headers,
-                )
-                continue
-            return response
-        return await self._client.send(request, stream=True)
+        return await _send_request_with_retry(
+            client=self._client,
+            request=request,
+            provider="gemini",
+            path=str(request.url),
+            stream=True,
+            raw_logger=self._raw_logger,
+        )
 
     async def _perform_non_stream_request(
         self,
@@ -1369,50 +1371,25 @@ class AntigravityResponsesGateway(BaseResponsesGateway):
         payload: dict[str, Any],
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                response = await self._client.post(path, json=payload, headers=headers)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt >= attempts:
-                    raise
-                await asyncio.sleep(_retry_delay_seconds(attempt))
-                continue
-
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < attempts:
-                await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
-                continue
-            return response
-        return await self._client.post(path, json=payload, headers=headers)
+        return await _post_json_with_retry(
+            client=self._client,
+            path=path,
+            payload=payload,
+            provider="antigravity",
+            stream=False,
+            raw_logger=self._raw_logger,
+            headers=headers,
+        )
 
     async def _send_with_retry(self, request: httpx.Request) -> httpx.Response:
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                response = await self._client.send(request, stream=True)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt >= attempts:
-                    raise
-                await asyncio.sleep(_retry_delay_seconds(attempt))
-                request = self._client.build_request(
-                    request.method,
-                    str(request.url),
-                    content=request.content,
-                    headers=request.headers,
-                )
-                continue
-
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < attempts:
-                await response.aclose()
-                await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
-                request = self._client.build_request(
-                    request.method,
-                    str(request.url),
-                    content=request.content,
-                    headers=request.headers,
-                )
-                continue
-            return response
+        return await _send_request_with_retry(
+            client=self._client,
+            request=request,
+            provider="antigravity",
+            path=str(request.url),
+            stream=True,
+            raw_logger=self._raw_logger,
+        )
         return await self._client.send(request, stream=True)
 
     async def _perform_non_stream_request(
@@ -1999,6 +1976,256 @@ def _is_retryable_upstream_error(error: UpstreamAPIError) -> bool:
     return False
 
 
+_RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+async def _post_json_with_retry(
+    *,
+    client: httpx.AsyncClient,
+    path: str,
+    payload: dict[str, Any],
+    provider: str,
+    stream: bool,
+    raw_logger: RawIOLogger | None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.post(path, json=payload, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt >= attempts:
+                raise _wrap_transport_exception(
+                    exc,
+                    provider=provider,
+                    path=path,
+                    stream=stream,
+                    raw_logger=raw_logger,
+                ) from exc
+            _log_transport_retry(
+                raw_logger,
+                provider=provider,
+                path=path,
+                stream=stream,
+                attempt=attempt,
+                attempts=attempts,
+                exc=exc,
+            )
+            await asyncio.sleep(_retry_delay_seconds(attempt))
+            continue
+
+        if response.status_code in _RETRYABLE_UPSTREAM_STATUS_CODES and attempt < attempts:
+            _log_response_retry(
+                raw_logger,
+                provider=provider,
+                path=path,
+                stream=stream,
+                attempt=attempt,
+                attempts=attempts,
+                response=response,
+            )
+            await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
+            continue
+        return response
+
+    raise UpstreamAPIError(
+        502,
+        {
+            "error": {
+                "message": "Upstream request retry loop exited unexpectedly.",
+                "type": "server_error",
+                "param": None,
+                "code": "unexpected_retry_exit",
+            }
+        },
+    )
+
+
+async def _send_request_with_retry(
+    *,
+    client: httpx.AsyncClient,
+    request: httpx.Request,
+    provider: str,
+    path: str,
+    stream: bool,
+    raw_logger: RawIOLogger | None,
+) -> httpx.Response:
+    attempts = 3
+    current_request = request
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.send(current_request, stream=True)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt >= attempts:
+                raise _wrap_transport_exception(
+                    exc,
+                    provider=provider,
+                    path=path,
+                    stream=stream,
+                    raw_logger=raw_logger,
+                ) from exc
+            _log_transport_retry(
+                raw_logger,
+                provider=provider,
+                path=path,
+                stream=stream,
+                attempt=attempt,
+                attempts=attempts,
+                exc=exc,
+            )
+            await asyncio.sleep(_retry_delay_seconds(attempt))
+            current_request = client.build_request(
+                current_request.method,
+                str(current_request.url),
+                content=current_request.content,
+                headers=current_request.headers,
+            )
+            continue
+
+        if response.status_code in _RETRYABLE_UPSTREAM_STATUS_CODES and attempt < attempts:
+            _log_response_retry(
+                raw_logger,
+                provider=provider,
+                path=path,
+                stream=stream,
+                attempt=attempt,
+                attempts=attempts,
+                response=response,
+            )
+            await response.aclose()
+            await asyncio.sleep(_retry_delay_seconds(attempt, response=response))
+            current_request = client.build_request(
+                current_request.method,
+                str(current_request.url),
+                content=current_request.content,
+                headers=current_request.headers,
+            )
+            continue
+        return response
+
+    raise UpstreamAPIError(
+        502,
+        {
+            "error": {
+                "message": "Upstream streaming retry loop exited unexpectedly.",
+                "type": "server_error",
+                "param": None,
+                "code": "unexpected_retry_exit",
+            }
+        },
+    )
+
+
+def _wrap_transport_exception(
+    exc: httpx.HTTPError,
+    *,
+    provider: str,
+    path: str,
+    stream: bool,
+    raw_logger: RawIOLogger | None,
+) -> UpstreamAPIError:
+    status_code = 504 if isinstance(exc, httpx.TimeoutException) else 502
+    payload = {
+        "error": {
+            "message": f"Upstream transport error: {exc}",
+            "type": "server_error",
+            "param": None,
+            "code": "upstream_timeout" if status_code == 504 else "upstream_connection_error",
+        }
+    }
+    if raw_logger is not None:
+        raw_logger.log(
+            "upstream.error",
+            {
+                "provider": provider,
+                "path": path,
+                "stream": stream,
+                "status_code": status_code,
+                "error_type": type(exc).__name__,
+                "error": payload,
+            },
+        )
+    return UpstreamAPIError(status_code, payload)
+
+
+def _log_transport_retry(
+    raw_logger: RawIOLogger | None,
+    *,
+    provider: str,
+    path: str,
+    stream: bool,
+    attempt: int,
+    attempts: int,
+    exc: httpx.HTTPError,
+) -> None:
+    if raw_logger is None:
+        return
+    raw_logger.log(
+        "upstream.retry",
+        {
+            "provider": provider,
+            "path": path,
+            "stream": stream,
+            "attempt": attempt,
+            "attempts": attempts,
+            "retrying": attempt < attempts,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        },
+    )
+
+
+def _log_response_retry(
+    raw_logger: RawIOLogger | None,
+    *,
+    provider: str,
+    path: str,
+    stream: bool,
+    attempt: int,
+    attempts: int,
+    response: httpx.Response,
+) -> None:
+    if raw_logger is None:
+        return
+    raw_logger.log(
+        "upstream.retry",
+        {
+            "provider": provider,
+            "path": path,
+            "stream": stream,
+            "attempt": attempt,
+            "attempts": attempts,
+            "retrying": attempt < attempts,
+            "status_code": response.status_code,
+        },
+    )
+
+
+def _build_response_failed_sse_lines(error: UpstreamAPIError) -> list[str]:
+    error_obj = error.payload.get("error") if isinstance(error.payload, dict) else None
+    if not isinstance(error_obj, dict):
+        error_obj = {
+            "message": "Upstream streaming request failed.",
+            "type": "server_error",
+            "param": None,
+            "code": "upstream_stream_failed",
+        }
+    failure_event = {
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": error_obj,
+        },
+    }
+    return [
+        "event: response.failed",
+        f"data: {json.dumps(failure_event, ensure_ascii=False)}",
+        "",
+        "data: [DONE]",
+        "",
+    ]
+
+
 async def _iter_sse_json_payloads(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, Any] | str]:
     data_lines: list[str] = []
     async for raw_line in lines:
@@ -2036,18 +2263,19 @@ async def _collect_completed_response_from_sse(lines: AsyncIterator[str]) -> dic
             response_obj = payload.get("response")
             if isinstance(response_obj, dict):
                 error_obj = response_obj.get("error")
+                normalized_error = (
+                    error_obj
+                    if isinstance(error_obj, dict)
+                    else {
+                        "message": "Upstream streaming request failed.",
+                        "type": "server_error",
+                        "param": None,
+                        "code": "upstream_stream_failed",
+                    }
+                )
                 raise UpstreamAPIError(
-                    502,
-                    {
-                        "error": error_obj
-                        if isinstance(error_obj, dict)
-                        else {
-                            "message": "Upstream streaming request failed.",
-                            "type": "server_error",
-                            "param": None,
-                            "code": "upstream_stream_failed",
-                        },
-                    },
+                    _status_code_from_response_failed_error(normalized_error),
+                    {"error": normalized_error},
                 )
         if payload_type == "response.created":
             response_obj = payload.get("response")
@@ -2088,6 +2316,31 @@ def _retry_delay_seconds(attempt: int, response: httpx.Response | None = None) -
         return max(0.0, min(retry_after, 5.0))
     base = 0.25 * (2 ** (attempt - 1))
     return min(base, 2.0)
+
+
+def _status_code_from_response_failed_error(error_obj: dict[str, Any]) -> int:
+    error_type = error_obj.get("type")
+    if not isinstance(error_type, str):
+        return 502
+
+    normalized_type = error_type.strip().lower()
+    if normalized_type == "invalid_request_error":
+        return 400
+    if normalized_type == "authentication_error":
+        return 401
+    if normalized_type == "permission_error":
+        return 403
+    if normalized_type == "not_found_error":
+        return 404
+    if normalized_type == "conflict_error":
+        return 409
+    if normalized_type == "unprocessable_entity_error":
+        return 422
+    if normalized_type == "rate_limit_error":
+        return 429
+    if normalized_type in {"server_error", "api_error"}:
+        return 500
+    return 502
 
 
 def _safe_int(value: Any) -> int:

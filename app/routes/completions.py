@@ -49,8 +49,8 @@ async def create_completion(
                 "error": {
                     "message": str(exc),
                     "type": "invalid_request_error",
-                    "param": None,
-                    "code": None,
+                    "param": exc.param,
+                    "code": exc.code,
                 }
             },
         )

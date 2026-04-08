@@ -1,12 +1,51 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_INVALID_FILENAME_CHARS = re.compile(r'[\\/\0\r\n\t"]+')
+_COLLAPSE_SPACES = re.compile(r"\s+")
+
+
+def normalize_user_supplied_filename(
+    filename: str | None,
+    fallback: str = "upload.bin",
+) -> str:
+    fallback_name = fallback.strip() or "upload.bin"
+    if not isinstance(filename, str):
+        return fallback_name
+
+    sanitized = _INVALID_FILENAME_CHARS.sub(" ", filename.strip())
+    sanitized = _COLLAPSE_SPACES.sub(" ", sanitized).strip(" .")
+    return sanitized or fallback_name
+
+
+def normalize_input_file_reference_for_cache(part: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {
+        "type": "input_file",
+        "filename": normalize_user_supplied_filename(part.get("filename"), fallback="upload.bin"),
+    }
+
+    file_id = part.get("file_id")
+    if isinstance(file_id, str) and file_id.strip():
+        normalized["file_id"] = file_id.strip()
+
+    file_url = part.get("file_url")
+    if isinstance(file_url, str) and file_url.strip():
+        normalized["file_url"] = file_url.strip()
+
+    file_data = part.get("file_data")
+    if isinstance(file_data, str) and file_data.strip():
+        normalized["file_digest"] = hashlib.sha256(file_data.strip().encode("utf-8")).hexdigest()[:24]
+
+    return normalized
 
 
 @dataclass(slots=True)
@@ -49,7 +88,7 @@ class LocalFileStore:
     ) -> StoredFileRecord:
         file_id = f"file-{uuid.uuid4().hex}"
         created_at = int(time.time())
-        resolved_filename = filename.strip() if filename.strip() else "upload.bin"
+        resolved_filename = normalize_user_supplied_filename(filename, fallback="upload.bin")
         resolved_content_type = (
             content_type.strip() if isinstance(content_type, str) and content_type.strip() else "application/octet-stream"
         )
@@ -184,6 +223,11 @@ def _resolve_openai_input_file_part(part: dict[str, Any], store: LocalFileStore)
     resolved = {key: _resolve_openai_value(value, store) for key, value in part.items()}
     file_id = resolved.get("file_id")
     if not isinstance(file_id, str) or not file_id.strip():
+        if "filename" in resolved:
+            resolved["filename"] = normalize_user_supplied_filename(
+                resolved.get("filename"),
+                fallback="upload.bin",
+            )
         return resolved
 
     data_url = store.build_data_url(file_id.strip())
@@ -193,7 +237,10 @@ def _resolve_openai_input_file_part(part: dict[str, Any], store: LocalFileStore)
     filename, _, file_data = data_url
     rebuilt = dict(resolved)
     rebuilt.pop("file_id", None)
-    rebuilt["filename"] = str(rebuilt.get("filename") or filename)
+    rebuilt["filename"] = normalize_user_supplied_filename(
+        rebuilt.get("filename") or filename,
+        fallback=filename,
+    )
     rebuilt["file_data"] = file_data
     return rebuilt
 
@@ -233,7 +280,10 @@ def _resolve_native_document_block(block: dict[str, Any], store: LocalFileStore)
     filename, content_type, file_data = data_url
     _, _, base64_data = file_data.partition(",")
     rebuilt = dict(resolved)
-    rebuilt["title"] = str(rebuilt.get("title") or filename)
+    rebuilt["title"] = normalize_user_supplied_filename(
+        rebuilt.get("title") or filename,
+        fallback=filename,
+    )
     rebuilt["source"] = {
         "type": "base64",
         "media_type": content_type,
@@ -256,7 +306,10 @@ def _resolve_native_input_file_block(block: dict[str, Any], store: LocalFileStor
     _, _, base64_data = file_data.partition(",")
     return {
         "type": "document",
-        "title": str(resolved.get("filename") or filename),
+        "title": normalize_user_supplied_filename(
+            resolved.get("filename") or filename,
+            fallback=filename,
+        ),
         "source": {
             "type": "base64",
             "media_type": content_type,

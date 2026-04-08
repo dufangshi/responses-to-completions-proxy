@@ -8,6 +8,22 @@ import { requestOpenai } from "./common";
 
 const ALLOWED_PATH = new Set(Object.values(OpenaiPath));
 
+function isAllowedPath(subpath: string) {
+  if (ALLOWED_PATH.has(subpath)) {
+    return true;
+  }
+
+  if (subpath === OpenaiPath.FilesPath) {
+    return true;
+  }
+
+  if (subpath.startsWith(`${OpenaiPath.FilesPath}/`)) {
+    return true;
+  }
+
+  return false;
+}
+
 function getModels(remoteModelRes: OpenAIListModelResponse) {
   const config = getServerSideConfig();
 
@@ -38,7 +54,7 @@ export async function handle(
 
   const subpath = params.path.join("/");
 
-  if (!ALLOWED_PATH.has(subpath)) {
+  if (!isAllowedPath(subpath)) {
     console.log("[OpenAI Route] forbidden path ", subpath);
     return NextResponse.json(
       {

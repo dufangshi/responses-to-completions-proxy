@@ -11,6 +11,7 @@ import type {
   ClientApi,
   MultimodalContent,
   RequestMessage,
+  UploadedFileRef,
 } from "../client/api";
 import { getClientApi } from "../client/api";
 import { ChatControllerPool } from "../client/controller";
@@ -407,22 +408,39 @@ export const useChatStore = createPersistStore(
       async onUserInput(
         content: string,
         attachImages?: string[],
+        attachFiles?: UploadedFileRef[],
         isMcpResponse?: boolean,
       ) {
         const session = get().currentSession();
         const modelConfig = session.mask.modelConfig;
 
         // MCP Response no need to fill template
-        let mContent: string | MultimodalContent[] = isMcpResponse
+        const formattedContent = isMcpResponse
           ? content
           : fillTemplateWith(content, modelConfig);
+        let mContent: string | MultimodalContent[] = formattedContent;
 
-        if (!isMcpResponse && attachImages && attachImages.length > 0) {
+        if (
+          !isMcpResponse &&
+          ((attachImages && attachImages.length > 0) ||
+            (attachFiles && attachFiles.length > 0))
+        ) {
           mContent = [
-            ...(content ? [{ type: "text" as const, text: content }] : []),
-            ...attachImages.map((url) => ({
+            ...(formattedContent
+              ? [{ type: "text" as const, text: formattedContent }]
+              : []),
+            ...(attachImages ?? []).map((url) => ({
               type: "image_url" as const,
               image_url: { url },
+            })),
+            ...(attachFiles ?? []).map((file) => ({
+              type: "file" as const,
+              file: {
+                file_id: file.fileId,
+                filename: file.filename,
+                content_type: file.contentType,
+                bytes: file.bytes,
+              },
             })),
           ];
         }
@@ -843,6 +861,7 @@ export const useChatStore = createPersistStore(
                       : String(result);
                   get().onUserInput(
                     `\`\`\`json:mcp-response:${mcpRequest.clientId}\n${mcpResponse}\n\`\`\``,
+                    [],
                     [],
                     true,
                   );

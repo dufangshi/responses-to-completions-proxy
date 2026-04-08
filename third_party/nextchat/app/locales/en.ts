@@ -82,6 +82,14 @@ const en: LocaleType = {
       Clear: "Clear Context",
       Settings: "Settings",
       UploadImage: "Upload Images",
+      UploadFile: "Upload Files",
+      ClearInput: "Clear Input",
+    },
+    Attachments: {
+      UnsupportedFile: "Only image, PDF, and TXT attachments are supported here.",
+      TooManyFiles: (count: number) => `You can attach up to ${count} files.`,
+      TooManyImages: (count: number) =>
+        `You can attach up to ${count} images.`,
     },
     Rename: "Rename Chat",
     Typing: "Typing…",

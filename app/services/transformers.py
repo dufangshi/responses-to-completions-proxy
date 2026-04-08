@@ -17,10 +17,21 @@ from app.models.legacy_completions import (
     LegacyCompletionRequest,
     LegacyCompletionResponse,
 )
+from app.services.responses_payload import ResponsesValidationError, validate_responses_input_items
+from app.services.file_store import normalize_user_supplied_filename
 
 
 class UnsupportedParameterError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        param: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.param = param
+        self.code = code
 
 
 UNSUPPORTED_FIELDS = (
@@ -135,6 +146,14 @@ def build_chat_responses_payload(
     input_items: list[dict[str, Any]] = []
     for message in request.messages:
         input_items.extend(build_chat_input_items(message.model_dump()))
+    try:
+        validate_responses_input_items(input_items)
+    except ResponsesValidationError as exc:
+        raise UnsupportedParameterError(
+            str(exc),
+            param=exc.param,
+            code=exc.code,
+        ) from exc
     payload: dict[str, Any] = {
         "model": target_model,
         "input": input_items,
@@ -329,8 +348,10 @@ def convert_chat_content_part(part: Any, role: str) -> dict[str, Any]:
 
 
 def _build_input_file_part(raw_file: dict[str, Any]) -> dict[str, Any]:
-    filename = raw_file.get("filename")
-    resolved_filename = filename.strip() if isinstance(filename, str) and filename.strip() else "document.pdf"
+    resolved_filename = normalize_user_supplied_filename(
+        raw_file.get("filename"),
+        fallback="upload.bin",
+    )
 
     file_id = raw_file.get("file_id")
     if isinstance(file_id, str) and file_id.strip():
